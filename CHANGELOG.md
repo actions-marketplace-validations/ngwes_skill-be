@@ -1,3 +1,10 @@
+# [1.2.0](https://github.com/ngwes/skill-be/compare/v1.1.0...v1.2.0) (2026-11-02)
+
+
+### Features
+
+* write the run as an html page with run --html ([8b01a7e](https://github.com/ngwes/skill-be/commit/8b01a7e8a736bc64f219f769aafd23f2d088c668))
+
 # [1.1.0](https://github.com/ngwes/skill-be/compare/v1.0.2...v1.1.0) (2026-11-01)
 
 
