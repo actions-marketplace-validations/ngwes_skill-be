@@ -182,6 +182,33 @@ describe('skill-be run', SLOW, () => {
     expect(outputs).toContain('rep-1-with-skill.md');
   });
 
+  it('writes results.html beside summary.json with --html, answers included', async () => {
+    await makeProject();
+
+    const { code, stdout } = await cli('run', '--html');
+
+    expect(code).toBe(0);
+    const dir = await runDir();
+    const html = await readFile(path.join(dir, 'results.html'), 'utf8');
+    expect(html).toMatch(/^<!doctype html>/);
+    expect(html).toContain('<strong>READY</strong>');
+    expect(html).toContain('href="#skill-a"');
+    // The fake model's answer, escaped.
+    expect(html).toContain('const twice = (n: number): number =&gt; double(n);');
+    expect(html).toContain('It calls double.');
+    expect(stdout).toContain(path.join('.skill-be', 'results', path.basename(dir), 'results.html'));
+  });
+
+  it('writes no results.html without --html', async () => {
+    await makeProject();
+
+    const { code, stdout } = await cli('run');
+
+    expect(code).toBe(0);
+    expect(await readdir(await runDir())).not.toContain('results.html');
+    expect(stdout).not.toContain('results.html');
+  });
+
   it('runs every skill under one timestamp and keeps the other result entries', async () => {
     await makeProject();
     await writeSkill('c', '# C\n');
@@ -547,6 +574,8 @@ describe('usage', () => {
     [['run', '--reps', '0'], '--reps must be a positive integer'],
     [['run', '--concurrency', 'many'], '--concurrency must be a positive integer'],
     [['verify', 'a'], 'verify takes no skill names'],
+    [['run', '--html=yes'], '--html takes no value'],
+    [['verify', '--html'], 'unknown option --html'],
   ])('%j exits 2', async (argv, message) => {
     const { code, stderr } = await cli(...argv);
 

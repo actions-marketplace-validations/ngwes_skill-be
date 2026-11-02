@@ -551,12 +551,18 @@ jobs:
           node-version: 22
       - run: npm ci
       - run: npm install --global @anthropic-ai/claude-code
-      - run: npx skill-be run
+      - run: npx skill-be run --html
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      # Keeps the page of the run, also when a skill is NOT READY.
+      - uses: actions/upload-artifact@v7
+        if: ${{ !cancelled() }}
+        with:
+          path: .skill-be/results/*/results.html
+          archive: false
 ```
 
-The benchmark job's exit code is the gate for that run. Its `skill-be.result.json` stays on the runner; to commit results, run the benchmark on your machine.
+The benchmark job's exit code is the gate for that run. Its `skill-be.result.json` stays on the runner; to commit results, run the benchmark on your machine. The last step saves `results.html` ([The HTML page](#the-html-page)) on the run's page in the Actions tab; `archive: false` keeps it a plain file rather than a zip.
 
 ### Use another model
 
@@ -1040,6 +1046,7 @@ Options:
   --config <path>    The config file (default: ./skill-be.yaml)
   --reps <n>         run: generations per arm per scenario, instead of the config's
   --concurrency <n>  run: model calls in flight at once, instead of the config's
+  --html             run: also writes results.html beside summary.json, with every answer
   --below <pct>      triage: also triage criteria that scored under pct% with the skill
   --samples <n>      triage: fresh with-skill samples per failing criterion (default: 2)
   -h, --help         Shows this help
@@ -1073,6 +1080,7 @@ Everything lands under `results`, in a directory named for the start time of the
 ```
 .skill-be/results/2026-10-31T16-20-05-112Z/
   summary.json                          the JSON summary of the run
+  results.html                          with --html: the run as a page to open in a browser
   money.md                              the markdown report of a skill
   money/<scenario>/<model>/
     rep-1-baseline.md                   a generated output
@@ -1082,6 +1090,16 @@ Everything lands under `results`, in a directory named for the start time of the
 ```
 
 Add `.skill-be/` to your `.gitignore`: the results directory is for inspection, and only `skill-be.result.json` is committed.
+
+### The HTML page
+
+`skill-be run --html` also writes `results.html`, the run as a page to open in a browser. It holds what `summary.json` holds, plus every answer:
+
+- a banner with the verdict of the run, how many skills block, the date, the models and the grader;
+- an overview table: each skill's verdict, errors, duration and why it blocks, linked to its section;
+- a section per skill, open when the skill blocks: the gate reasons, then each scenario with its prompt, its scores per model and the grader's notes, and, folded, every rep's answer from both arms with the grader replies.
+
+The page is one file that loads nothing and runs no script, so it opens offline and still works when you move it or download it from CI ([Verify in CI](#verify-in-ci)). Like `summary.json`, it is rewritten after every skill.
 
 `run` ends with a summary of the verdicts, the checks and the files it wrote ([sample](#run-the-benchmark)). The checks run after the benchmark, over every skill that has an eval file. A bad check setting (for example a `library` that does not exist) stops `run` with exit code 2 before the first model call.
 

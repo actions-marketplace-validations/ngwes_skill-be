@@ -36,6 +36,7 @@ const model = (
   ),
   notes,
   errors,
+  outputs: [],
 });
 
 const scenarioResult = (

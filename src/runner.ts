@@ -18,7 +18,18 @@ export type ModelResult = {
   notes: string[];
   /** Outputs that could not be generated or graded; their criteria counted as 0. */
   errors: number;
+  /** One entry per rep, in rep order: what each arm answered and what the grader replied. */
+  outputs: RepOutputs[];
 };
+
+/**
+ * One arm's output as its file holds it (`[ERROR: ...]` when it could not be generated), and the
+ * grader's raw answers as their files hold them (none for an output that was not generated).
+ */
+export type ArmOutput = { output: string; gradings: string[] };
+
+/** Both arms of one rep, by their name in file names. */
+export type RepOutputs = Record<Arm, ArmOutput>;
 
 export type ScenarioResult = { scenario: Scenario; models: ModelResult[] };
 
@@ -47,7 +58,7 @@ export type RunDeps = {
 /** The arms, by their name in file names. */
 const ARMS = ['baseline', 'with-skill'] as const;
 
-type Arm = (typeof ARMS)[number];
+export type Arm = (typeof ARMS)[number];
 
 /** How progress lines and notes name each arm, as run-benchmark.mjs does. */
 const ARM_LABELS: Record<Arm, string> = { baseline: 'baseline', 'with-skill': 'with skill' };
@@ -55,8 +66,8 @@ const ARM_LABELS: Record<Arm, string> = { baseline: 'baseline', 'with-skill': 'w
 /** A model under test with its resolved adapter, its label and its results directory name. */
 type Model = { settings: AdapterSettings; adapter: Adapter; label: string; dir: string };
 
-/** One graded output: its verdicts (`null` when it counts as an error) and its notes. */
-type OutputResult = { verdicts: Verdicts | null; notes: string[] };
+/** One graded output: its verdicts (`null` when it counts as an error), its notes and its texts. */
+type OutputResult = { verdicts: Verdicts | null; notes: string[]; kept: ArmOutput };
 
 /**
  * Runs the benchmark of one skill: for every scenario and every model under test, `reps`
@@ -141,17 +152,23 @@ export async function runSkill(
           () => 'grading FAILED',
         );
         log(`  ${tag}: ${outcome} (${seconds(Date.now() - t0)})`);
-        return { verdicts: graded.verdicts, notes: graded.notes };
+        return {
+          verdicts: graded.verdicts,
+          notes: graded.notes,
+          kept: { output, gradings: graded.rawAnswers },
+        };
       },
       async (error) => {
         // A config problem is the user's to fix: it stops the run (exit 2), not an output error.
         if (isConfigProblem(error)) throw error;
         const message = oneLine(error instanceof Error ? error.message : String(error));
-        await writeFile(`${file}.md`, `[ERROR: ${message}]\n`);
+        const text = `[ERROR: ${message}]\n`;
+        await writeFile(`${file}.md`, text);
         log(`  ${tag}: generation failed — ${message.slice(0, 200)}`);
         return {
           verdicts: null,
           notes: [`[ERROR] generation failed, criteria counted as 0: ${message}`],
+          kept: { output: text, gradings: [] },
         };
       },
     );
@@ -221,6 +238,10 @@ export async function runSkill(
         (sum, rep) => sum + ARMS.filter((arm) => rep[arm].verdicts === null).length,
         0,
       ),
+      outputs: reps.map((rep) => ({
+        baseline: rep.baseline.kept,
+        'with-skill': rep['with-skill'].kept,
+      })),
     };
   }
 

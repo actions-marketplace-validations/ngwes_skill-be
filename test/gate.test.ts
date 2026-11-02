@@ -19,6 +19,7 @@ const model = (label: string, scores: Scores, errors = 0): ModelResult => ({
   ),
   notes: [],
   errors,
+  outputs: [],
 });
 
 const scenarioResult = (
