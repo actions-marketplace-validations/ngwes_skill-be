@@ -170,6 +170,7 @@ describe('runSkill scores', () => {
         ],
         notes: [],
         errors: 0,
+        outputs: expect.any(Array),
       },
     ]);
   });
@@ -199,6 +200,7 @@ describe('runSkill scores', () => {
           'fake (m1) timed out after 120s',
       ],
       errors: 1,
+      outputs: expect.any(Array),
     });
     // The failed output is not graded.
     expect(graded).toEqual(['good']);
@@ -223,6 +225,7 @@ describe('runSkill scores', () => {
           'unparseable grader answer: "garbage"',
       ],
       errors: 1,
+      outputs: expect.any(Array),
     });
   });
 
@@ -300,6 +303,40 @@ describe('runSkill files', () => {
     expect(await readFile(path.join(dir, 'rep-1-baseline.grading-2.md'), 'utf8')).toMatch(
       /^grading \d\nReasons\.\nVERDICTS:\n1: YES\n2: NO$/,
     );
+  });
+
+  it('keeps each output and its grader answers in the result, as the files hold them', async () => {
+    const model: Adapter = async (prompt) => {
+      if (isWithSkill(prompt) && prompt.includes('s2')) throw new Error('down');
+      return `${isWithSkill(prompt) ? 'skill' : 'base'} output good`;
+    };
+    let gradings = 0;
+    const grader: Adapter = async () => `grading ${++gradings}\n${verdicts(true, false)}`;
+
+    const run = await runSkill(
+      makeSuite([scenario('s1'), scenario('s2')]),
+      makeConfig({ reps: 2, gradings: 2 }),
+      fakes(model, grader),
+    );
+
+    const [s1, s2] = run.scenarios.map((result) => result.models[0]?.outputs ?? []);
+    expect(s1).toHaveLength(2);
+    const dir = path.join(root, 'results', 'T1', 'demo', 's1', 'm1');
+    for (const [r, rep] of (s1 ?? []).entries()) {
+      for (const arm of ['baseline', 'with-skill'] as const) {
+        const file = path.join(dir, `rep-${r + 1}-${arm}`);
+        expect(rep[arm].output).toBe(await readFile(`${file}.md`, 'utf8'));
+        expect(rep[arm].gradings).toHaveLength(2);
+        for (const [k, answer] of rep[arm].gradings.entries()) {
+          expect(answer).toBe(await readFile(`${file}.grading-${k + 1}.md`, 'utf8'));
+        }
+      }
+    }
+    // A failed output keeps its error text and has no grader answers.
+    expect(s2?.map((rep) => rep['with-skill'])).toEqual([
+      { output: '[ERROR: down]\n', gradings: [] },
+      { output: '[ERROR: down]\n', gradings: [] },
+    ]);
   });
 
   it('writes the error in place of an output that failed, and no grading files for it', async () => {

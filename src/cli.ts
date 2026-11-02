@@ -16,6 +16,7 @@ import { typecheckSkill, validateTypecheck } from './checks/typecheck.js';
 import { loadConfig } from './config.js';
 import { skillFingerprint } from './fingerprint.js';
 import { evaluateGate, type GateVerdict } from './gate.js';
+import { renderHtml } from './html-report.js';
 import { killActiveChildren } from './process.js';
 import { renderReport, toSummary } from './report.js';
 import {
@@ -53,6 +54,7 @@ Options:
   --config <path>    The config file (default: ./skill-be.yaml)
   --reps <n>         run: generations per arm per scenario, instead of the config's
   --concurrency <n>  run: model calls in flight at once, instead of the config's
+  --html             run: also writes results.html beside summary.json, with every answer
   --below <pct>      triage: also triage criteria that scored under pct% with the skill
   --samples <n>      triage: fresh with-skill samples per failing criterion (default: 2)
   -h, --help         Shows this help
@@ -68,14 +70,22 @@ class UsageError extends Error {
 
 type CommandName = 'run' | 'verify' | 'check' | 'triage';
 
-type Args = { command: CommandName; skills: string[]; options: Map<string, string> };
+type Args = {
+  command: CommandName;
+  skills: string[];
+  options: Map<string, string>;
+  flags: Set<string>;
+};
 
-/** What each command accepts: its options (without `--`) and whether it takes skill names. */
-const SYNTAX: Record<CommandName, { options: string[]; skills: boolean }> = {
-  run: { options: ['config', 'reps', 'concurrency'], skills: true },
-  verify: { options: ['config'], skills: false },
-  check: { options: ['config'], skills: false },
-  triage: { options: ['config', 'below', 'samples'], skills: true },
+/**
+ * What each command accepts: its options with a value and its flags without one (both without
+ * `--`), and whether it takes skill names.
+ */
+const SYNTAX: Record<CommandName, { options: string[]; flags: string[]; skills: boolean }> = {
+  run: { options: ['config', 'reps', 'concurrency'], flags: ['html'], skills: true },
+  verify: { options: ['config'], flags: [], skills: false },
+  check: { options: ['config'], flags: [], skills: false },
+  triage: { options: ['config', 'below', 'samples'], flags: [], skills: true },
 };
 
 /** What a command prints with and where it is run from. */
@@ -145,6 +155,7 @@ function parseArgs(argv: string[]): Args | 'help' {
 
   const skills: string[] = [];
   const options = new Map<string, string>();
+  const flags = new Set<string>();
   for (let i = 0; i < rest.length; i++) {
     const arg = rest[i] as string;
     if (!arg.startsWith('-')) {
@@ -153,6 +164,11 @@ function parseArgs(argv: string[]): Args | 'help' {
     }
     const match = /^--([^=]+)(?:=([\s\S]*))?$/.exec(arg);
     const key = match?.[1];
+    if (key !== undefined && syntax.flags.includes(key)) {
+      if (match?.[2] !== undefined) throw new UsageError(`--${key} takes no value`);
+      flags.add(key);
+      continue;
+    }
     if (key === undefined || !syntax.options.includes(key)) {
       throw new UsageError(`unknown option ${arg.split('=')[0]} for "${name}"`);
     }
@@ -167,7 +183,7 @@ function parseArgs(argv: string[]): Args | 'help' {
   if (!syntax.skills && skills.length > 0) {
     throw new UsageError(`${name} takes no skill names (got ${skills.join(' ')})`);
   }
-  return { command: name, skills, options };
+  return { command: name, skills, options, flags };
 }
 
 /** The option's value; none when it is not given, a `UsageError` when it is not a valid one. */
@@ -306,6 +322,7 @@ async function runCommand(args: Args, ctx: Context): Promise<number> {
   const timestamp = resultsTimestamp();
   const runDir = path.join(config.results, timestamp);
   const summaryPath = path.join(runDir, 'summary.json');
+  const htmlPath = Option.from(args.flags.has('html') ? path.join(runDir, 'results.html') : null);
   const runs: SkillRun[] = [];
   const gates = new Map<string, GateVerdict>();
   const entries: Record<string, SkillEntry> = {};
@@ -333,6 +350,21 @@ async function runCommand(args: Args, ctx: Context): Promise<number> {
 
     // Written after every skill, so an interrupted run keeps what it finished.
     await writeFile(summaryPath, JSON.stringify(toSummary(runs, gates), null, 2) + '\n');
+    await htmlPath.matchAsync(
+      (file) =>
+        writeFile(
+          file,
+          renderHtml(runs, gates, {
+            models: config.models,
+            grader: config.grader,
+            reps: config.reps,
+            gradings: config.gradings,
+            // The day the run started: its first skill's.
+            date: (runs[0] as SkillRun).startedAt.slice(0, 10),
+          }),
+        ),
+      async () => {},
+    );
     entries[suite.name] = {
       date,
       fingerprint: fingerprints[i] as string,
@@ -357,7 +389,13 @@ async function runCommand(args: Args, ctx: Context): Promise<number> {
   }
   for (const line of checks.lines) ctx.out(line);
   ctx.out('Written:');
-  for (const file of [...reports, summaryPath, config.resultFile]) ctx.out(`  ${ctx.show(file)}`);
+  const written = [
+    ...reports,
+    summaryPath,
+    ...htmlPath.match((file) => [file], () => []),
+    config.resultFile,
+  ];
+  for (const file of written) ctx.out(`  ${ctx.show(file)}`);
 
   const notReady = runs.filter((run) => !gates.get(run.skill)?.ready);
   const blockers = [
