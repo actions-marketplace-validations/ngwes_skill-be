@@ -2,6 +2,19 @@
   "name": "@ngwes/skill-be",
   "version": "1.2.0",
   "description": "A CLI that benchmarks Agent Skills: baseline versus with-skill, LLM-graded and gated, on any harness.",
+  "keywords": [
+    "agent-skills",
+    "skill-md",
+    "claude-code",
+    "claude-skills",
+    "llm",
+    "evals",
+    "llm-evaluation",
+    "llm-as-a-judge",
+    "benchmark",
+    "release-gate",
+    "cli"
+  ],
   "repository": {
     "type": "git",
     "url": "git+https://github.com/ngwes/skill-be.git"
