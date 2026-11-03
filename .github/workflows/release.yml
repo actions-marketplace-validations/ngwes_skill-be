@@ -42,3 +42,17 @@ jobs:
       - run: npx semantic-release
         env:
           GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+      # `uses: ngwes/skill-be@v1` runs the action at the tag v1: point it at each new 1.x release.
+      # A release leaves HEAD on its tagged release commit; without one, HEAD has no version tag.
+      - name: Move the major version tag
+        env:
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          tag=$(git tag --points-at HEAD --list 'v*.*.*' | head -n 1)
+          if [ -z "$tag" ]; then
+            echo "No new release"
+            exit 0
+          fi
+          major="${tag%%.*}"
+          git tag -f "$major" "$tag"
+          git push -f "https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}.git" "refs/tags/$major"
