@@ -1,0 +1,48 @@
+# The skill-be GitHub Action. It runs a skill-be command, `verify` by default, and fails the job
+# when the command's exit code is not 0. It runs the skill-be the project installs when there is
+# one, else the npm release that matches the action's tag (`@v1` runs the latest 1.x).
+name: skill-be
+description: Gate Agent Skills in CI. Fails when a skill changed since its last benchmark or is not READY.
+author: ngwes
+branding:
+  icon: check-circle
+  color: green
+
+inputs:
+  command:
+    description: The skill-be command, `verify` by default. `verify` and `check` call no model.
+    default: verify
+  args:
+    description: More arguments for the command, separated by spaces, such as `--config path`.
+    default: ''
+  working-directory:
+    description: The folder to run in, the one that holds `skill-be.yaml`.
+    default: .
+  version:
+    description: >-
+      The skill-be version to run when the project does not install it. By default the version of
+      the action's tag (`@v1` runs the latest 1.x, `@v1.3.0` runs 1.3.0), else the latest.
+    default: ''
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        COMMAND: ${{ inputs.command }}
+        ARGS: ${{ inputs.args }}
+        VERSION: ${{ inputs.version }}
+        ACTION_REF: ${{ github.action_ref }}
+      run: |
+        # ARGS is split on spaces on purpose: it holds several arguments
+        if [ -e node_modules/.bin/skill-be ]; then
+          exec npx --no-install skill-be "$COMMAND" $ARGS
+        fi
+        if [ -z "$VERSION" ]; then
+          case "$ACTION_REF" in
+            v[0-9]*) VERSION="${ACTION_REF#v}" ;;
+            *) VERSION=latest ;;
+          esac
+        fi
+        exec npx --yes "@ngwes/skill-be@$VERSION" "$COMMAND" $ARGS
