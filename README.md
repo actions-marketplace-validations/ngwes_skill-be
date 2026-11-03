@@ -574,6 +574,20 @@ jobs:
 
 The benchmark job's exit code is the gate for that run. Its `skill-be.result.json` stays on the runner; to commit results, run the benchmark on your machine. The last step saves `results.html` ([The HTML page](#the-html-page)) on the run's page in the Actions tab; `archive: false` keeps it a plain file rather than a zip.
 
+The `verify` step can also be the skill-be GitHub Action:
+
+```yaml
+      - run: npm ci
+      - uses: ngwes/skill-be@v1
+```
+
+The action runs the skill-be the project installs, here with `npm ci`. Without one, it runs the npm release that matches its tag: `@v1` runs the latest 1.x. Install the project's dependencies first when the checks are on, since they typecheck against the library. Its inputs:
+
+- `command`: the skill-be command, `verify` by default.
+- `args`: more arguments, separated by spaces, such as `--config path`.
+- `working-directory`: the folder that holds `skill-be.yaml`, `.` by default.
+- `version`: the skill-be version to run when the project does not install it.
+
 ### Use another model
 
 The model under test and the grader are separate entries, so either one can come from another harness. With pi, using your pi login or the key ([Credentials](#credentials)):
