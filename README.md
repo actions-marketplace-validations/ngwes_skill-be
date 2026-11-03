@@ -1,5 +1,11 @@
 # skill-be
 
+<!-- docs-site:skip-start -->
+[![npm](https://img.shields.io/npm/v/@ngwes/skill-be)](https://www.npmjs.com/package/@ngwes/skill-be)
+[![CI](https://github.com/ngwes/skill-be/actions/workflows/ci.yml/badge.svg)](https://github.com/ngwes/skill-be/actions/workflows/ci.yml)
+[![License](https://img.shields.io/npm/l/@ngwes/skill-be)](LICENSE)
+<!-- docs-site:skip-end -->
+
 skill-be(nchmark) tests Agent Skills (`SKILL.md` files) and gives a pass/fail release gate for them.
 
 <!-- docs-site:skip-start -->
@@ -7,6 +13,10 @@ skill-be(nchmark) tests Agent Skills (`SKILL.md` files) and gives a pass/fail re
 <!-- docs-site:skip-end -->
 
 A skill is documentation written for a model: it teaches the model how to use your library, follow your conventions or do a task your way. Whether it works is hard to see by reading it. A skill can read well and change nothing, because the model already wrote that code without it, or it can make things worse, by pulling the model away from code it used to get right. Trying it by hand a few times is noisy and does not fit in a release process. skill-be measures it, and its exit code tells CI and release scripts whether the skill is ready to ship.
+
+![The results.html page of a real run on nine skills: eight are READY; validate is NOT READY because two criteria score 0% with the skill, and its scores show baseline versus with-skill for each criterion](https://raw.githubusercontent.com/ngwes/skill-be/main/assets/results-page.png)
+
+*A real run of the [mini-fp skills](https://github.com/ngwes/mini-fp-skills), as `skill-be run --html` shows it: one skill is blocked, and its section says which criteria failed and how each scenario scored without and with the skill.*
 
 ## How it works
 
