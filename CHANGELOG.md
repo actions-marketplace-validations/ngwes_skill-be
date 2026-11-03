@@ -1,3 +1,10 @@
+# [1.3.0](https://github.com/ngwes/skill-be/compare/v1.2.0...v1.3.0) (2026-11-03)
+
+
+### Features
+
+* add a github action that runs skill-be verify ([81afa21](https://github.com/ngwes/skill-be/commit/81afa2159c55dc7e19a9a0f463cc0e3b72a47c06))
+
 # [1.2.0](https://github.com/ngwes/skill-be/compare/v1.1.0...v1.2.0) (2026-11-02)
 
 
