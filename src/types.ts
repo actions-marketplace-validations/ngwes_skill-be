@@ -41,6 +41,21 @@ export type Config = {
   gate: { regressionOnCritical: boolean; blockOnZero: boolean; blockOnErrors: boolean };
   checks: { typecheck: TypecheckConfig | false; coverage: CoverageConfig | false };
   triage: { model: AdapterSettings | null };
+  codeTests: {
+    /** Absolute path of the tests folder; null when `tests` is not set. */
+    tests: string | null;
+    /**
+     * Absolute path of the default package list when the YAML sets `codeTests.packages`; null when
+     * it does not. The fallback to `<root>/test-packages.json` is applied where the list is used.
+     */
+    packages: string | null;
+    /** Skill name -> absolute path of its package list, for skills that do not use the default. */
+    packagesBySkill: Record<string, string>;
+    testTimeoutSeconds: number;
+    answerTimeoutSeconds: number;
+    /** Words the contract hint check accepts. */
+    allow: string[];
+  };
 };
 
 /**

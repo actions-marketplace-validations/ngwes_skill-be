@@ -49,6 +49,14 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
     gate: { regressionOnCritical: true, blockOnZero: true, blockOnErrors: true },
     checks: { typecheck: false, coverage: false },
     triage: { model: TRIAGER },
+    codeTests: {
+      tests: null,
+      packages: null,
+      packagesBySkill: {},
+      testTimeoutSeconds: 10,
+      answerTimeoutSeconds: 60,
+      allow: [],
+    },
     ...overrides,
   };
 }
