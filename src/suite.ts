@@ -120,14 +120,14 @@ function scenarioList(data: Option<unknown>): Checked<Scenario[]> {
 function parseScenario(raw: unknown, index: number): Checked<Scenario> {
   if (!isRecord(raw)) return fail(`"scenarios[${index}]" must be an object`);
 
-  const { id, critical, prompt, criteria } = raw;
+  const { id, critical, prompt, criteria, output } = raw;
   return check(
     isNonEmptyString(id),
     id as string,
     () => `scenarios[${index}]: "id" must be a non-empty string`,
   ).bind((id) => {
     const where = `scenario "${id}"`;
-    return all<Scenario>({
+    return all<Parsed>({
       id: pass(id),
       critical: check(
         critical === undefined || typeof critical === 'boolean',
@@ -139,13 +139,77 @@ function parseScenario(raw: unknown, index: number): Checked<Scenario> {
         prompt as string,
         () => `${where}: "prompt" must be a non-empty string`,
       ),
-      criteria: check(
-        Array.isArray(criteria) && criteria.length > 0 && criteria.every(isNonEmptyString),
-        criteria as string[],
-        () => `${where}: "criteria" must be a non-empty list of non-empty strings`,
-      ).map((list) => [...list]),
-    });
+      criteria:
+        criteria === undefined
+          ? pass<string[]>([])
+          : check(
+              Array.isArray(criteria) && criteria.length > 0 && criteria.every(isNonEmptyString),
+              criteria as string[],
+              () => `${where}: "criteria" must be a non-empty list of non-empty strings`,
+            ).map((list) => [...list]),
+      output: parseOutput(output, where),
+      tests: pass<string[]>([]),
+    })
+      .bind((scenario) =>
+        check(
+          scenario.criteria.length > 0 || scenario.output.isSome(),
+          scenario,
+          () => `${where}: needs "criteria", an "output" contract, or both`,
+        ),
+      )
+      .map((scenario) => ({
+        ...scenario,
+        output: scenario.output.match<Record<string, string> | null>(
+          (contract) => contract,
+          () => null,
+        ),
+      }));
   });
+}
+
+/** A scenario as it is checked: a `Validate` cannot hold `null`, so no `output` is a `none`. */
+type Parsed = Omit<Scenario, 'output'> & { output: Option<Record<string, string>> };
+
+const FIELD_NAME = /^[A-Za-z_$][\w$]*$/;
+const MAX_DESCRIPTION_LENGTH = 200;
+
+/**
+ * The `output` contract of a scenario: a mapping of field names (JavaScript identifiers) to their
+ * descriptions (non-empty, at most 200 characters), in the eval file's order, with a `result`
+ * field. `none` when the scenario declares no contract.
+ */
+function parseOutput(output: unknown, where: string): Checked<Option<Record<string, string>>> {
+  if (output === undefined) return pass(Option.none<Record<string, string>>());
+  if (!isRecord(output)) {
+    return fail(`${where}: "output" must be a mapping of field names to descriptions`);
+  }
+
+  const fields = Object.entries(output).map(([name, description]) =>
+    all<{ name: string; description: string }>({
+      name: check(
+        FIELD_NAME.test(name),
+        name,
+        () => `${where}: "output.${name}" must be a JavaScript identifier`,
+      ),
+      description: check(
+        isNonEmptyString(description) && description.length <= MAX_DESCRIPTION_LENGTH,
+        description as string,
+        () =>
+          `${where}: "output.${name}" must be a non-empty string of at most ` +
+          `${MAX_DESCRIPTION_LENGTH} characters`,
+      ),
+    }).map((field) => [field.name, field.description] as const),
+  );
+
+  return sequenceValidate(fields)
+    .map((entries) => Object.fromEntries(entries))
+    .bind((contract) =>
+      check(
+        'result' in contract,
+        Option.some(contract),
+        () => `${where}: "output" must have a "result" field`,
+      ),
+    );
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

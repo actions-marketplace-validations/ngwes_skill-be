@@ -53,6 +53,8 @@ const scenario = (id: string, criteria = ['c1', 'c2']): Scenario => ({
   critical: false,
   prompt: `Task for ${id}`,
   criteria,
+  output: null,
+  tests: [],
 });
 
 function makeSuite(scenarios: Scenario[] = [scenario('s1')], skillText = 'the skill'): SkillSuite {

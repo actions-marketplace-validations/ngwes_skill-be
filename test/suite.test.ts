@@ -35,12 +35,16 @@ describe('loadSuites', () => {
         critical: true,
         prompt: 'Write a TypeScript function that returns twice the value it is given.',
         criteria: ['Calls double() instead of multiplying', 'Returns a number'],
+        output: null,
+        tests: [],
       },
       {
         id: 'double-a-list',
         critical: false,
         prompt: 'Write a TypeScript function that doubles every number in a list.',
         criteria: ['Maps the list with double()'],
+        output: null,
+        tests: [],
       },
     ]);
     expect(warnings).toEqual(['skill "b" has no eval file']);
@@ -149,6 +153,119 @@ describe('loadSuites on malformed projects', () => {
     expect(error.message).toContain('x.json');
     expect(error.message).toContain('"no-criteria"');
     expect(error.message).toContain('criteria');
+  });
+
+  it('parses a judge-only scenario with output null and no tests', async () => {
+    const { suites } = await loadWithEval(JSON.stringify({ skill: 'x', scenarios: [scenario()] }));
+
+    const parsed = suites[0]!.scenarios[0]!;
+    expect(parsed.output).toBeNull();
+    expect(parsed.tests).toEqual([]);
+    expect(parsed.criteria).toEqual(['It is done']);
+  });
+
+  it('parses an output contract in key order', async () => {
+    const output = { result: 'a number', reason: 'why' };
+
+    const { suites } = await loadWithEval(
+      JSON.stringify({ skill: 'x', scenarios: [scenario({ output })] }),
+    );
+
+    const parsed = suites[0]!.scenarios[0]!;
+    expect(parsed.output).toEqual(output);
+    expect(Object.keys(parsed.output!)).toEqual(['result', 'reason']);
+    expect(parsed.tests).toEqual([]);
+  });
+
+  it('accepts a scenario with an output contract and no criteria', async () => {
+    const { suites } = await loadWithEval(
+      JSON.stringify({
+        skill: 'x',
+        scenarios: [scenario({ criteria: undefined, output: { result: 'a number' } })],
+      }),
+    );
+
+    const parsed = suites[0]!.scenarios[0]!;
+    expect(parsed.criteria).toEqual([]);
+    expect(parsed.output).toEqual({ result: 'a number' });
+  });
+
+  it('rejects a scenario with neither criteria nor an output contract', async () => {
+    const error = await failureFor(
+      JSON.stringify({ skill: 'x', scenarios: [scenario({ id: 'x', criteria: undefined })] }),
+    );
+
+    expect(error.message).toContain('x.json');
+    expect(error.message).toContain('scenario "x": needs "criteria", an "output" contract, or both');
+  });
+
+  it('rejects an output contract without result', async () => {
+    const error = await failureFor(
+      JSON.stringify({
+        skill: 'x',
+        scenarios: [scenario({ id: 'x', output: { reason: 'why' } })],
+      }),
+    );
+
+    expect(error.message).toContain('scenario "x": "output" must have a "result" field');
+  });
+
+  it('rejects an output field name that is not an identifier', async () => {
+    const error = await failureFor(
+      JSON.stringify({
+        skill: 'x',
+        scenarios: [scenario({ id: 'x', output: { result: 'a number', 'my field': 'why' } })],
+      }),
+    );
+
+    expect(error.message).toContain('"output.my field" must be a JavaScript identifier');
+  });
+
+  it('rejects an output description that is empty or longer than 200 characters', async () => {
+    for (const description of ['', '   ', 'x'.repeat(201)]) {
+      const error = await failureFor(
+        JSON.stringify({
+          skill: 'x',
+          scenarios: [scenario({ id: 'x', output: { result: description } })],
+        }),
+      );
+
+      expect(error.message).toContain(
+        '"output.result" must be a non-empty string of at most 200 characters',
+      );
+    }
+  });
+
+  it('accepts an output description of exactly 200 characters', async () => {
+    const { suites } = await loadWithEval(
+      JSON.stringify({
+        skill: 'x',
+        scenarios: [scenario({ output: { result: 'x'.repeat(200) } })],
+      }),
+    );
+
+    expect(suites[0]!.scenarios[0]!.output).toEqual({ result: 'x'.repeat(200) });
+  });
+
+  it('rejects an output contract that is not a mapping', async () => {
+    for (const output of ['a number', ['result'], null, 3]) {
+      const error = await failureFor(
+        JSON.stringify({ skill: 'x', scenarios: [scenario({ id: 'x', output })] }),
+      );
+
+      expect(error.message).toContain('scenario "x": "output" must be a mapping');
+    }
+  });
+
+  it('still rejects an empty criteria list', async () => {
+    const error = await failureFor(
+      JSON.stringify({
+        skill: 'x',
+        scenarios: [scenario({ id: 'x', criteria: [], output: { result: 'a number' } })],
+      }),
+    );
+
+    expect(error.message).toContain('"criteria" must be a non-empty list of non-empty strings');
   });
 
   it('rejects a duplicate scenario id, naming the file and the scenario', async () => {

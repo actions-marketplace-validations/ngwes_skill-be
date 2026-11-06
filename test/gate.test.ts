@@ -28,7 +28,14 @@ const scenarioResult = (
   models: ModelResult[],
   critical = false,
 ): ScenarioResult => {
-  const scenario: Scenario = { id, critical, prompt: `Task for ${id}`, criteria };
+  const scenario: Scenario = {
+    id,
+    critical,
+    prompt: `Task for ${id}`,
+    criteria,
+    output: null,
+    tests: [],
+  };
   return { scenario, models };
 };
 

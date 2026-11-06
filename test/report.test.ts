@@ -43,7 +43,13 @@ const scenarioResult = (
   scenario: Partial<Scenario> & { id: string; criteria: string[] },
   models: ModelResult[],
 ): ScenarioResult => ({
-  scenario: { critical: false, prompt: `Task for ${scenario.id}`, ...scenario },
+  scenario: {
+    critical: false,
+    prompt: `Task for ${scenario.id}`,
+    output: null,
+    tests: [],
+    ...scenario,
+  },
   models,
 });
 

@@ -31,7 +31,14 @@ const RUNS: SkillRun[] = [
     durationMs: 252_000,
     scenarios: [
       {
-        scenario: { id: 'parse-config', critical: false, prompt: 'Parse it.', criteria: ['Uses Either'] },
+        scenario: {
+          id: 'parse-config',
+          critical: false,
+          prompt: 'Parse it.',
+          criteria: ['Uses Either'],
+          output: null,
+          tests: [],
+        },
         models: [model([[0, 100]], [rep('either base answer', 'either skill answer')])],
       },
     ],
@@ -48,6 +55,8 @@ const RUNS: SkillRun[] = [
           critical: true,
           prompt: 'Pick the theme.',
           criteria: ['Falls back inside the chain', 'Uses Option.from'],
+          output: null,
+          tests: [],
         },
         models: [
           model(
@@ -167,7 +176,14 @@ describe('renderHtml', () => {
         skill: 'a<b>',
         scenarios: [
           {
-            scenario: { id: 'i<d>', critical: false, prompt: hostile, criteria: [hostile] },
+            scenario: {
+              id: 'i<d>',
+              critical: false,
+              prompt: hostile,
+              criteria: [hostile],
+              output: null,
+              tests: [],
+            },
             models: [model([[0, 100]], [rep(hostile, hostile)], [hostile])],
           },
         ],

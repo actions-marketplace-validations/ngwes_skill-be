@@ -43,7 +43,20 @@ export type Config = {
   triage: { model: AdapterSettings | null };
 };
 
-export type Scenario = { id: string; critical: boolean; prompt: string; criteria: string[] };
+/**
+ * One task of an eval file, graded by a judge (`criteria`), by real tests (`output` and `tests`),
+ * or both. `criteria` is `[]` when the judge has nothing to grade. `output` is the contract of
+ * fields the model's code must export (name to description, in the eval file's order), or `null`
+ * for a judge-only scenario. `tests` names the code tests of the scenario; parsing leaves it `[]`.
+ */
+export type Scenario = {
+  id: string;
+  critical: boolean;
+  prompt: string;
+  criteria: string[];
+  output: Record<string, string> | null;
+  tests: string[];
+};
 
 export type SkillSuite = {
   name: string;
