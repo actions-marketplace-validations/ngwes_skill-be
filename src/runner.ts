@@ -2,6 +2,7 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { Option, TryAsync, repeatWhile } from '@ngwes/mini-fp';
 import { isConfigProblem, resolveAdapter, type Adapter } from './adapters/index.js';
+import { armPrompts } from './code-tests/contract.js';
 import { gradeOutput, type Verdicts } from './grader.js';
 import { createLimiter } from './limiter.js';
 import type { AdapterSettings, Config, Scenario, SkillSuite } from './types.js';
@@ -190,9 +191,10 @@ export async function runSkill(
         path.join(dir, `rep-${rep}-${name}`),
         `${label} ${ARM_LABELS[name]}`,
       );
+    const prompts = armPrompts(config.withSkillTemplate, suite.skillText, scenario);
     const [baseline, withSkill] = await Promise.all([
-      arm('baseline', scenario.prompt),
-      arm('with-skill', fillTemplate(config.withSkillTemplate, suite.skillText, scenario.prompt)),
+      arm('baseline', prompts.baseline),
+      arm('with-skill', prompts.withSkill),
     ]);
     doneReps++;
     log(

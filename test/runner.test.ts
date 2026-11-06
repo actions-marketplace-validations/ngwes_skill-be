@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { AdapterError, type Adapter, type AdapterContext } from '../src/adapters/index.js';
+import { contractParagraph } from '../src/code-tests/contract.js';
 import { modelLabels, resultsTimestamp, runSkill } from '../src/runner.js';
 import {
   ConfigError,
@@ -136,6 +137,26 @@ describe('runSkill prompts', () => {
     await runSkill(makeSuite(undefined, 'uses $& and {{task}}'), makeConfig(), fakes(model));
 
     expect(prompts.filter(isWithSkill)).toEqual(['SKILL<uses $& and {{task}}>\nTASK<Task for s1>']);
+  });
+
+  it('sends the contract paragraph to both arms', async () => {
+    const prompts: string[] = [];
+    const model: Adapter = async (prompt) => {
+      prompts.push(prompt);
+      return 'good';
+    };
+    const contract = { result: 'the value', reason: 'why' };
+    const withContract: Scenario = { ...scenario('s1'), output: contract };
+
+    await runSkill(makeSuite([withContract]), makeConfig(), fakes(model));
+
+    const paragraph = contractParagraph(contract);
+    expect(prompts.filter(isWithSkill)).toEqual([
+      `SKILL<the skill>\nTASK<Task for s1>\n\n${paragraph}`,
+    ]);
+    expect(prompts.filter((prompt) => !isWithSkill(prompt))).toEqual([
+      `Task for s1\n\n${paragraph}`,
+    ]);
   });
 
   it('sends the grader the configured instructions, settings, timeout and cwd', async () => {
