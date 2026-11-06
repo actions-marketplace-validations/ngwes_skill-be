@@ -95,6 +95,25 @@ describe('contractHints', () => {
     expect(contractHints(suite([task], skillText), null, [])).toEqual([]);
   });
 
+  it('ignores identifiers shorter than three characters in a derived vocabulary', () => {
+    const skillText = '```ts\nconst a = 1;\n```\n\nCall `x` first.';
+    // The prompt has neither word, so only the length filter keeps "a" and "x" quiet.
+    const task = scenario({
+      prompt: 'Parse the input.',
+      output: { result: 'a value, plus x' },
+    });
+
+    expect(contractHints(suite([task], skillText), null, [])).toEqual([]);
+  });
+
+  it('does not filter an explicit vocabulary by length', () => {
+    const task = scenario({ prompt: 'Parse the input.', output: { result: 'a value, plus x' } });
+
+    const hints = contractHints(suite([task]), ['x'], []);
+
+    expect(hints).toEqual([warning('result', 'x')]);
+  });
+
   it('keeps a word the vocabulary names even when it is a keyword or built-in', () => {
     const task = scenario({ output: { result: 'a Promise of the value' } });
 
