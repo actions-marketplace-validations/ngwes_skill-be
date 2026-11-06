@@ -1,4 +1,4 @@
-import { readdir, readFile } from 'node:fs/promises';
+import { readdir, readFile, stat } from 'node:fs/promises';
 import path from 'node:path';
 import {
   Either,
@@ -10,6 +10,7 @@ import {
   traverseEither,
 } from '@ngwes/mini-fp';
 import { all, check, fail, firstProblem, pass, valueOrThrow, type Checked } from './checked.js';
+import { discoverTests } from './code-tests/discover.js';
 import { ConfigError, type Config, type Scenario, type SkillSuite } from './types.js';
 
 type Skill = { name: string; skillPath: string; skillText: string };
@@ -29,13 +30,81 @@ export async function loadSuites(config: Config, only?: string[]): Promise<Loade
     { suites: [], warnings: [] },
     async ({ suites, warnings }, skill) => {
       const evalPath = path.join(config.evals, `${skill.name}.json`);
-      return (await readIfPresent(evalPath)).match<Loaded>(
-        (evalText) => ({
-          suites: [...suites, { ...skill, evalPath, scenarios: scenariosOf(evalText, evalPath) }],
-          warnings,
-        }),
+      return (await readIfPresent(evalPath)).matchAsync<Loaded>(
+        async (evalText) => {
+          const scenarios = scenariosOf(evalText, evalPath);
+          const code = await codeTestsOf(config, skill.name, scenarios);
+          return { suites: [...suites, { ...skill, evalPath, scenarios, ...code }], warnings };
+        },
         () => ({ suites, warnings: [...warnings, `skill "${skill.name}" has no eval file`] }),
       );
+    },
+  );
+}
+
+type CodeTests = Pick<SkillSuite, 'testFiles' | 'codeFiles' | 'packageList'>;
+
+const NO_CODE_TESTS: CodeTests = { testFiles: {}, codeFiles: [], packageList: null };
+const DEFAULT_PACKAGE_LIST = 'test-packages.json';
+
+/**
+ * The code tests of a skill. A skill without an `output` contract has none, but its test folder is
+ * still read, so that a test file for a scenario that lacks a contract is reported. A skill with
+ * one needs the `tests` folder of the config and a test file per contract.
+ */
+async function codeTestsOf(
+  config: Config,
+  skill: string,
+  scenarios: Scenario[],
+): Promise<CodeTests> {
+  const { tests } = config.codeTests;
+  const contracted = scenarios.find((scenario) => scenario.output !== null);
+
+  if (tests === null) {
+    if (contracted === undefined) return NO_CODE_TESTS;
+    throw new ConfigError(
+      `scenario "${contracted.id}" of skill "${skill}" has an "output" contract but "tests" is ` +
+        'not set in the config',
+    );
+  }
+
+  const found = await discoverTests(tests, skill, scenarios);
+  if (contracted === undefined) return NO_CODE_TESTS;
+  return { ...found, packageList: await packageListOf(config, skill) };
+}
+
+/**
+ * The package list of a skill with output contracts: the one set for the skill, else the one set
+ * for all skills, else `test-packages.json` in the config folder when there is one, else none. A
+ * list the config names must exist.
+ */
+async function packageListOf(config: Config, skill: string): Promise<string | null> {
+  const { packages, packagesBySkill } = config.codeTests;
+  const own = Object.prototype.hasOwnProperty.call(packagesBySkill, skill)
+    ? packagesBySkill[skill]
+    : undefined;
+
+  return Option.from(own ?? packages).matchAsync<string | null>(
+    async (named) => {
+      if (await isFile(named)) return named;
+      throw new ConfigError(
+        `${named}: the package list does not exist (needed by skill "${skill}")`,
+      );
+    },
+    async () => {
+      const fallback = path.join(config.root, DEFAULT_PACKAGE_LIST);
+      return (await isFile(fallback)) ? fallback : null;
+    },
+  );
+}
+
+function isFile(file: string): Promise<boolean> {
+  return TryAsync.runAsync(() => stat(file)).match<boolean>(
+    (info) => info.isFile(),
+    (error) => {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === 'ENOENT' || code === 'ENOTDIR') return false;
+      throw new ConfigError(`cannot read ${file} (${(error as Error).message})`);
     },
   );
 }

@@ -77,6 +77,9 @@ function makeSuite(name = 'demo', scenarios: Scenario[] = [scenario('s1')]): Ski
     skillText: `the ${name} skill`,
     evalPath: path.join(root, 'evals', `${name}.json`),
     scenarios,
+    testFiles: {},
+    codeFiles: [],
+    packageList: null,
   };
 }
 

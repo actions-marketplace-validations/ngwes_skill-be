@@ -81,6 +81,18 @@ export type SkillSuite = {
   /** Absolute path of the skill's eval file. */
   evalPath: string;
   scenarios: Scenario[];
+  /** Scenario id -> absolute path of its test file; `{}` when no scenario has an output contract. */
+  testFiles: Record<string, string>;
+  /**
+   * Absolute paths of the skill's test files and helpers and of the shared helpers, sorted; `[]`
+   * when no scenario has an output contract. The fingerprint of the skill covers them.
+   */
+  codeFiles: string[];
+  /**
+   * Absolute path of the package list the tests need; null when there is none to install, and when
+   * no scenario has an output contract.
+   */
+  packageList: string | null;
 };
 
 /** A problem with the config, the skills or an eval file: the user must fix it (exit code 2). */

@@ -46,7 +46,16 @@ async function skill(
 ): Promise<SkillSuite> {
   const evalPath = path.join(dir, `${name}.json`);
   await writeFile(evalPath, evalText);
-  return { name, skillPath: path.join(dir, name, 'SKILL.md'), skillText, evalPath, scenarios: [] };
+  return {
+    name,
+    skillPath: path.join(dir, name, 'SKILL.md'),
+    skillText,
+    evalPath,
+    scenarios: [],
+    testFiles: {},
+    codeFiles: [],
+    packageList: null,
+  };
 }
 
 async function missingIn(
@@ -285,7 +294,16 @@ describe.runIf(Boolean(SKILLS_REPO && MINI_FP_ENTRY))('the mini-fp-skills covera
       const skillPath = path.join(REPO, 'skills', name, 'SKILL.md');
       const skillText = await readFile(skillPath, 'utf8');
       const evalPath = path.join(REPO, 'evals', `${name}.json`);
-      suites.push({ name, skillPath, skillText, evalPath, scenarios: [] });
+      suites.push({
+        name,
+        skillPath,
+        skillText,
+        evalPath,
+        scenarios: [],
+        testFiles: {},
+        codeFiles: [],
+        packageList: null,
+      });
     }
     const cfg: CoverageConfig = { preset: 'typescript', entry: ENTRY, ignore: [], blocking: false };
 
