@@ -47,10 +47,7 @@ export async function coverage(
   root: string,
   deps: CoverageDeps = {},
 ): Promise<CoverageResult> {
-  const api = await Option.from(cfg.command).matchAsync(
-    (command) => commandApi(command, root),
-    () => typescriptApi(cfg, root, deps),
-  );
+  const api = await listApi(cfg, root, deps);
   const ignored = new Set(cfg.ignore);
   const text = (await Promise.all(suites.map(mentionableText))).flat().join('\n');
 
@@ -59,6 +56,28 @@ export async function coverage(
     if (!ignored.has(name) && !mentions(text, word)) missing.add(name);
   }
   return { missing: [...missing].sort(), blocking: cfg.blocking };
+}
+
+/**
+ * The words that stand for the library's public API: the word `coverage` looks for to count each
+ * name as mentioned (a class member by its member name), each word once, in the API's order. The
+ * `ignore` list of the coverage settings is not applied.
+ */
+export async function apiWords(
+  cfg: CoverageConfig,
+  root: string,
+  deps: CoverageDeps = {},
+): Promise<string[]> {
+  const api = await listApi(cfg, root, deps);
+  return [...new Set(api.map(({ word }) => word))];
+}
+
+/** The API names, from the command when `cfg.command` is set, else from the preset. */
+function listApi(cfg: CoverageConfig, root: string, deps: CoverageDeps): Promise<ApiName[]> {
+  return Option.from(cfg.command).matchAsync(
+    (command) => commandApi(command, root),
+    () => typescriptApi(cfg, root, deps),
+  );
 }
 
 /**
@@ -226,7 +245,8 @@ function stringsOf(value: unknown): string[] {
 /** A character that continues an identifier, so a name inside a longer word is not a mention. */
 const WORD_CHAR = '[\\p{L}\\p{N}_$]';
 
-function mentions(text: string, word: string): boolean {
+/** Whether `word` appears in `text` as a whole word, with the same case. */
+export function mentions(text: string, word: string): boolean {
   const escaped = word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   return new RegExp(`(?<!${WORD_CHAR})${escaped}(?!${WORD_CHAR})`, 'u').test(text);
 }
