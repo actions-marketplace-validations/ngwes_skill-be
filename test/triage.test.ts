@@ -93,6 +93,7 @@ function summaryScenario(
     critical: s.critical,
     prompt: s.prompt,
     criteria: [...s.criteria],
+    tests: [...s.tests],
     models: Object.entries(models).map(([model, scores]) => ({
       model,
       criteria: scores.map(([baselinePct, withSkillPct]) => ({ baselinePct, withSkillPct })),

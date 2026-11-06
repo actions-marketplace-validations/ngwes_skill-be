@@ -8,6 +8,7 @@ import { Option } from '@ngwes/mini-fp';
 import { fmtDelta, type GateBlock, type GateVerdict } from './gate.js';
 import type { ReportMethod } from './report.js';
 import type { ArmOutput, CriterionScore, ModelResult, SkillRun } from './runner.js';
+import { scoredLines } from './scored-lines.js';
 import type { AdapterSettings } from './types.js';
 
 /** The text, safe in an element and in a quoted attribute. */
@@ -95,15 +96,29 @@ function notesList(notes: readonly string[]): string {
   return `<ul class="notes">${items.join('')}</ul>`;
 }
 
+/** An arm's test outcomes, `✓ name` or `✗ name — message`; nothing when it ran no test. */
+function testsList(outcomes: ArmOutput['tests']): string {
+  if (outcomes.length === 0) return '';
+  const items = outcomes.map((outcome) =>
+    outcome.pass
+      ? `<li class="note">✓ ${escapeHtml(outcome.name)}</li>`
+      : `<li class="error">✗ ${escapeHtml(outcome.name)} — ${escapeHtml(outcome.message)}</li>`,
+  );
+  return `<h6>Tests</h6><ul class="notes">${items.join('')}</ul>`;
+}
+
 function arm(label: string, kept: ArmOutput): string {
   const replies = kept.gradings.map((reply) => `<pre>${escapeHtml(reply.trimEnd())}</pre>`);
+  // An answer its tests scored was checked, even when no judge graded it.
   const gradings =
-    replies.length === 0
-      ? '<p class="muted">Not graded.</p>'
-      : `<details class="gradings"><summary>Grader replies (${replies.length})</summary>` +
-        `${replies.join('')}</details>`;
+    replies.length > 0
+      ? `<details class="gradings"><summary>Grader replies (${replies.length})</summary>` +
+        `${replies.join('')}</details>`
+      : kept.tests.length > 0
+        ? ''
+        : '<p class="muted">Not graded.</p>';
   const output = `<pre>${escapeHtml(kept.output.trimEnd())}</pre>`;
-  return `<div class="arm"><h6>${label}</h6>${output}${gradings}</div>`;
+  return `<div class="arm"><h6>${label}</h6>${output}${testsList(kept.tests)}${gradings}</div>`;
 }
 
 function answers(model: ModelResult): string {
@@ -129,7 +144,8 @@ function skillSection(run: SkillRun, gate: GateVerdict): string {
     const perModel = models.map(
       (model) =>
         `<div class="model"><h4>${escapeHtml(model.model)}</h4>` +
-        `${scoresTable(scenario.criteria, model)}${notesList(model.notes)}${answers(model)}</div>`,
+        `${scoresTable(scoredLines(scenario), model)}${notesList(model.notes)}` +
+        `${answers(model)}</div>`,
     );
     return (
       `<div class="scenario"><h3>${escapeHtml(scenario.id)}${critical}</h3>` +
@@ -209,7 +225,8 @@ code { font: 12px ui-monospace, SFMono-Regular, Consolas, monospace; }
 /**
  * The page of a run: a banner with the overall verdict and the method, an overview table of the
  * skills, then a section per skill (open when it blocks) with its gate reasons, and for each
- * scenario and model the scores, the notes and, folded, every answer with its grader replies.
+ * scenario and model the scores (criteria, then `[test]` lines), the notes and, folded, every
+ * answer with its test results and its grader replies.
  *
  * @throws when a skill has no verdict in `gates`.
  */

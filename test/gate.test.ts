@@ -27,14 +27,15 @@ const scenarioResult = (
   criteria: string[],
   models: ModelResult[],
   critical = false,
+  tests: string[] = [],
 ): ScenarioResult => {
   const scenario: Scenario = {
     id,
     critical,
     prompt: `Task for ${id}`,
     criteria,
-    output: null,
-    tests: [],
+    output: tests.length > 0 ? { result: 'the value' } : null,
+    tests,
   };
   return { scenario, models };
 };
@@ -201,6 +202,48 @@ describe('evaluateGate', () => {
         { ...ALL_ON, regressionOnCritical: false },
       );
       expect(result).toEqual({ ready: true, reasons: [], blocks: [] });
+    });
+  });
+
+  describe('test lines', () => {
+    it('blocks on a test line at 0% with the skill', () => {
+      const result = evaluateGate(
+        run([
+          scenarioResult(
+            'create-user',
+            ['c1'],
+            [model('m1', [[100, 100], [0, 0], [0, 100]])],
+            false,
+            ['responds 201', 'rejects a bad body'],
+          ),
+        ]),
+        ALL_ON,
+      );
+      expect(result.reasons).toEqual([
+        '**BLOCKED** (universal 0%): `create-user` — criterion: *"[test] responds 201"*',
+      ]);
+      expect(result.blocks).toEqual([{ kind: 'zero', scenario: 'create-user', criterion: 1 }]);
+    });
+
+    it('blocks a critical scenario\'s test regression', () => {
+      const result = evaluateGate(
+        run([
+          scenarioResult(
+            'create-user',
+            [],
+            [model('m1', [[100, 33]]), model('m2', [[100, 100]])],
+            true,
+            ['responds 201'],
+          ),
+        ]),
+        ALL_ON,
+      );
+      expect(result.reasons).toEqual([
+        '**BLOCKED** (regression): `create-user` / m1 — *"[test] responds 201"*: 100% → 33% (-67pp)',
+      ]);
+      expect(result.blocks).toEqual([
+        { kind: 'regression', scenario: 'create-user', criterion: 0, model: 'm1' },
+      ]);
     });
   });
 

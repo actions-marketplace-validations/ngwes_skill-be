@@ -8,11 +8,13 @@
 
 import { Option } from '@ngwes/mini-fp';
 import type { SkillRun } from './runner.js';
+import { scoredLines } from './scored-lines.js';
 import type { Config } from './types.js';
 
 /**
  * The structured form of one reason: what blocked, and where. `criterion` is the 0-based index
- * into the scenario's `criteria`; `model` is the model's label.
+ * into the scenario's scored lines (`scoredLines`: the criteria, then the tests); `model` is the
+ * model's label.
  */
 export type GateBlock = {
   kind: 'zero' | 'regression' | 'error';
@@ -36,13 +38,15 @@ export function fmtDelta(delta: number): string {
 
 /**
  * Decides whether a skill is READY. It is NOT READY when any enabled rule holds:
- * - `blockOnErrors`: an output could not be generated or graded (`run.errorCount > 0`).
- * - `blockOnZero`: a criterion scores 0% with the skill on every model under test.
- * - `regressionOnCritical`: in a critical scenario, a criterion scores lower with the skill than
- *   in the baseline on a model.
+ * - `blockOnErrors`: an output could not be generated or graded, or its tests could not run
+ *   (`run.errorCount > 0`).
+ * - `blockOnZero`: a criterion or test scores 0% with the skill on every model under test.
+ * - `regressionOnCritical`: in a critical scenario, a criterion or test scores lower with the
+ *   skill than in the baseline on a model.
  *
- * The error comes first, then each scenario's criteria in order, a criterion's zero block before
- * its regressions, which go in model order.
+ * A test is named `[test] <name>` in the reasons, like a criterion otherwise. The error comes
+ * first, then each scenario's scored lines in order, a line's zero block before its regressions,
+ * which go in model order.
  */
 export function evaluateGate(run: SkillRun, gate: Config['gate']): GateVerdict {
   const reasons: string[] = [];
@@ -60,7 +64,7 @@ export function evaluateGate(run: SkillRun, gate: Config['gate']): GateVerdict {
   }
 
   for (const { scenario, models } of run.scenarios) {
-    scenario.criteria.forEach((criterion, c) => {
+    scoredLines(scenario).forEach((criterion, c) => {
       const zeroEverywhere = models.every(
         (model) =>
           Option.from(model.criteria[c])

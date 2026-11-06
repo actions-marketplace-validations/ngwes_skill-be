@@ -10,6 +10,7 @@
 import { Option } from '@ngwes/mini-fp';
 import { fmtDelta, type GateBlock, type GateVerdict } from './gate.js';
 import type { CriterionScore, SkillRun } from './runner.js';
+import { scoredLines } from './scored-lines.js';
 import type { AdapterSettings } from './types.js';
 
 /** How the benchmark was run, as the `Method:` line names it. */
@@ -34,9 +35,10 @@ export function cell(text: string): string {
 }
 
 /**
- * The markdown section of one skill: the method, one table per scenario and model, and the
- * Release Gate. It ends the way the console output of `run-benchmark.mjs` does, with a blank
- * line, so reports can be appended to the log back to back.
+ * The markdown section of one skill: the method, one table per scenario and model (a row per
+ * criterion, then a `[test] <name>` row per test), and the Release Gate. It ends the way the
+ * console output of `run-benchmark.mjs` does, with a blank line, so reports can be appended to
+ * the log back to back.
  */
 export function renderReport(
   run: SkillRun,
@@ -68,7 +70,7 @@ export function renderReport(
       out.push('');
       out.push('| Criterion | Baseline | With skill | Delta |');
       out.push('|-----------|----------|------------|-------|');
-      scenario.criteria.forEach((criterion, c) => {
+      scoredLines(scenario).forEach((criterion, c) => {
         const { baselinePct, withSkillPct } = Option.from<CriterionScore>(
           model.criteria[c],
         ).orElse({ baselinePct: 0, withSkillPct: 0 });
@@ -106,7 +108,10 @@ export function renderReport(
 export type ModelSummary = {
   /** The model's label, as in the report. */
   model: string;
-  /** One score per criterion, in criterion order. */
+  /**
+   * One score per scored line: one per entry of the scenario's `criteria`, in order, then one per
+   * entry of its `tests`, in order.
+   */
   criteria: CriterionScore[];
   /** `[ERROR] ...` notes first, then `[NOTE] ...` notes. */
   notes: string[];
@@ -116,7 +121,10 @@ export type ScenarioSummary = {
   id: string;
   critical: boolean;
   prompt: string;
+  /** The judge criteria. */
   criteria: string[];
+  /** The names of the code tests, without the `[test] ` label; `[]` for a judge-only scenario. */
+  tests: string[];
   /** In config order. */
   models: ModelSummary[];
 };
@@ -165,6 +173,7 @@ export function toSummary(
           critical: scenario.critical,
           prompt: scenario.prompt,
           criteria: [...scenario.criteria],
+          tests: [...scenario.tests],
           models: models.map((model) => ({
             model: model.model,
             criteria: model.criteria.map(({ baselinePct, withSkillPct }) => ({

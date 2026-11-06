@@ -9,8 +9,8 @@ const HAIKU: AdapterSettings = { adapter: 'claude-cli', id: 'claude-haiku-5-5' }
 const METHOD = { models: [SONNET], grader: HAIKU, reps: 1, gradings: 1, date: '2026-11-02' };
 
 const rep = (baseline: string, withSkill: string): RepOutputs => ({
-  baseline: { output: baseline, gradings: [`graded ${baseline}`] },
-  'with-skill': { output: withSkill, gradings: [`graded ${withSkill}`] },
+  baseline: { output: baseline, gradings: [`graded ${baseline}`], tests: [] },
+  'with-skill': { output: withSkill, gradings: [`graded ${withSkill}`], tests: [] },
 });
 
 const model = (scores: [number, number][], outputs: RepOutputs[], notes: string[] = []) =>
@@ -197,6 +197,74 @@ describe('renderHtml', () => {
     expect(page).toContain('&lt;/pre&gt;&lt;/details&gt;&lt;script&gt;alert(&quot;x&quot;)&lt;/script&gt; &amp; &lt;b&gt;');
     expect(page).toContain('id="skill-a%3Cb%3E"');
     expect(page).toContain('href="#skill-a%3Cb%3E"');
+  });
+
+  it("shows each arm's test results with failure messages, escaped", () => {
+    const runs: SkillRun[] = [
+      {
+        ...RUNS[0]!,
+        scenarios: [
+          {
+            scenario: {
+              id: 'create-user',
+              critical: false,
+              prompt: 'Create a user.',
+              criteria: [],
+              output: { result: 'the handler' },
+              tests: ['responds 201', 'rejects <b>'],
+            },
+            models: [
+              model(
+                [
+                  [0, 100],
+                  [0, 50],
+                ],
+                [
+                  {
+                    baseline: {
+                      output: 'base code',
+                      gradings: [],
+                      tests: [
+                        { name: 'responds 201', pass: false, message: 'expected 201, got <500>' },
+                        { name: 'rejects <b>', pass: false, message: 'no code block' },
+                      ],
+                    },
+                    'with-skill': {
+                      output: 'skill code',
+                      gradings: [],
+                      tests: [
+                        { name: 'responds 201', pass: true, message: '' },
+                        { name: 'rejects <b>', pass: true, message: '' },
+                      ],
+                    },
+                  },
+                ],
+              ),
+            ],
+          },
+        ],
+      },
+    ];
+
+    const page = section(renderHtml(runs, GATES, METHOD), 'either');
+
+    expect(page).not.toContain('<b>');
+    expect(page).toContain(
+      '<h6>Tests</h6><ul class="notes"><li class="error">✗ responds 201 — expected 201, got ' +
+        '&lt;500&gt;</li><li class="error">✗ rejects &lt;b&gt; — no code block</li></ul>',
+    );
+    expect(page).toContain(
+      '<h6>Tests</h6><ul class="notes"><li class="note">✓ responds 201</li>' +
+        '<li class="note">✓ rejects &lt;b&gt;</li></ul>',
+    );
+    expect(text(page)).toContain('[test] responds 201 0% 100% +100pp');
+    expect(text(page)).toContain('[test] rejects <b> 0% 50% +50pp');
+    // Only the judge's replies are missing, and the tests say what was checked.
+    expect(page).not.toContain('Not graded.');
+  });
+
+  it('shows no test list for a judge-only scenario', () => {
+    expect(html).not.toContain('<h6>Tests</h6>');
   });
 
   it('follows the light or dark setting of the system', () => {

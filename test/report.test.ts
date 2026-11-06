@@ -259,6 +259,40 @@ describe('renderReport', () => {
     expect(report).toContain('| Handles null and undefined | 0% | 100% | +100pp |\n');
   });
 
+  it('lists test lines in the scores table', () => {
+    const report = renderReport(
+      run([
+        scenarioResult(
+          {
+            id: 'create-user',
+            criteria: ['Validates the body'],
+            output: { result: 'the handler' },
+            tests: ['responds 201', 'rejects a | in the name'],
+          },
+          [
+            model('m', [
+              [0, 100],
+              [33, 100],
+              [100, 67],
+            ]),
+          ],
+        ),
+      ]),
+      READY_GATE,
+      METHOD,
+    );
+    expect(report).toContain(
+      [
+        '| Criterion | Baseline | With skill | Delta |',
+        '|-----------|----------|------------|-------|',
+        '| Validates the body | 0% | 100% | +100pp |',
+        '| [test] responds 201 | 33% | 100% | +67pp |',
+        '| [test] rejects a \\| in the name | 100% | 67% | -33pp |',
+        '',
+      ].join('\n'),
+    );
+  });
+
   it('puts the gate reasons of a real verdict in the report byte for byte', () => {
     const verdict = evaluateGate(fixture(), ALL_ON);
     const report = renderReport(fixture(), verdict, METHOD);
@@ -270,72 +304,128 @@ describe('renderReport', () => {
 describe('toSummary', () => {
   const gateFor = (skillRun: SkillRun): GateVerdict => evaluateGate(skillRun, ALL_ON);
 
+  /** The summary of `fixture()`, its keys in the order `summary.json` holds them. */
+  const fixtureSummary = (gate: GateVerdict): RunSummary => ({
+    skills: [
+      {
+        skill: 'validate',
+        startedAt: '2026-10-31T09:00:00.000Z',
+        durationMs: 4200,
+        errorCount: 1,
+        ready: false,
+        reasons: gate.reasons,
+        blocks: gate.blocks,
+        scenarios: [
+          {
+            id: 'accumulate-field-errors',
+            critical: true,
+            prompt: 'Write validators for a signup form. Return ALL errors at once.',
+            criteria: ['Uses Validate (not Either)', 'Returns all errors, not just the first'],
+            tests: [],
+            models: [
+              {
+                model: 'claude-sonnet-5-5',
+                criteria: [
+                  { baselinePct: 0, withSkillPct: 100 },
+                  { baselinePct: 100, withSkillPct: 100 },
+                ],
+                notes: [],
+              },
+              {
+                model: 'gpt-x',
+                criteria: [
+                  { baselinePct: 0, withSkillPct: 67 },
+                  { baselinePct: 100, withSkillPct: 67 },
+                ],
+                notes: [],
+              },
+            ],
+          },
+          {
+            id: 'batch-array-validation',
+            critical: false,
+            prompt: 'Validate an array of numbers.',
+            criteria: ['Uses sequenceValidate'],
+            tests: [],
+            models: [
+              {
+                model: 'claude-sonnet-5-5',
+                criteria: [{ baselinePct: 100, withSkillPct: 100 }],
+                notes: [],
+              },
+              {
+                model: 'gpt-x',
+                criteria: [{ baselinePct: 33, withSkillPct: 0 }],
+                notes: [
+                  '[ERROR] rep 1 baseline — generation failed, criteria counted as 0: timed out',
+                  '[NOTE] rep 2 with skill — 1 of 3 gradings failed and was dropped',
+                ],
+              },
+            ],
+          },
+        ],
+      },
+    ],
+  });
+
   it('summarizes each skill with its run, its gate and its scenarios', () => {
     const skillRun = fixture();
     const gate = gateFor(skillRun);
     const summary: RunSummary = toSummary([skillRun], new Map([['validate', gate]]));
 
-    expect(summary).toEqual({
-      skills: [
+    expect(summary).toEqual(fixtureSummary(gate));
+  });
+
+  it("a judge-only run's summary.json is unchanged", () => {
+    const skillRun = fixture();
+    const gate = gateFor(skillRun);
+    const summary = toSummary([skillRun], new Map([['validate', gate]]));
+
+    // Byte for byte, key order included: the only new key is `tests: []`, after `criteria`.
+    expect(JSON.stringify(summary, null, 2)).toBe(JSON.stringify(fixtureSummary(gate), null, 2));
+  });
+
+  it('summary keeps criteria and adds tests', () => {
+    const skillRun = run([
+      scenarioResult(
         {
-          skill: 'validate',
-          startedAt: '2026-10-31T09:00:00.000Z',
-          durationMs: 4200,
-          errorCount: 1,
-          ready: false,
-          reasons: gate.reasons,
-          blocks: gate.blocks,
-          scenarios: [
-            {
-              id: 'accumulate-field-errors',
-              critical: true,
-              prompt: 'Write validators for a signup form. Return ALL errors at once.',
-              criteria: ['Uses Validate (not Either)', 'Returns all errors, not just the first'],
-              models: [
-                {
-                  model: 'claude-sonnet-5-5',
-                  criteria: [
-                    { baselinePct: 0, withSkillPct: 100 },
-                    { baselinePct: 100, withSkillPct: 100 },
-                  ],
-                  notes: [],
-                },
-                {
-                  model: 'gpt-x',
-                  criteria: [
-                    { baselinePct: 0, withSkillPct: 67 },
-                    { baselinePct: 100, withSkillPct: 67 },
-                  ],
-                  notes: [],
-                },
-              ],
-            },
-            {
-              id: 'batch-array-validation',
-              critical: false,
-              prompt: 'Validate an array of numbers.',
-              criteria: ['Uses sequenceValidate'],
-              models: [
-                {
-                  model: 'claude-sonnet-5-5',
-                  criteria: [{ baselinePct: 100, withSkillPct: 100 }],
-                  notes: [],
-                },
-                {
-                  model: 'gpt-x',
-                  criteria: [{ baselinePct: 33, withSkillPct: 0 }],
-                  notes: [
-                    '[ERROR] rep 1 baseline — generation failed, criteria counted as 0: ' +
-                      'timed out',
-                    '[NOTE] rep 2 with skill — 1 of 3 gradings failed and was dropped',
-                  ],
-                },
-              ],
-            },
-          ],
+          id: 'create-user',
+          criteria: ['Validates the body'],
+          output: { result: 'the handler' },
+          tests: ['responds 201'],
         },
-      ],
-    });
+        [
+          model('m', [
+            [0, 100],
+            [33, 100],
+          ]),
+        ],
+      ),
+    ]);
+    const summary = toSummary([skillRun], new Map([['validate', gateFor(skillRun)]]));
+
+    expect(summary.skills[0]?.scenarios).toEqual([
+      {
+        id: 'create-user',
+        critical: false,
+        prompt: 'Task for create-user',
+        criteria: ['Validates the body'],
+        tests: ['responds 201'],
+        models: [
+          {
+            model: 'm',
+            criteria: [
+              { baselinePct: 0, withSkillPct: 100 },
+              { baselinePct: 33, withSkillPct: 100 },
+            ],
+            notes: [],
+          },
+        ],
+      },
+    ]);
+    // A copy, not the scenario's own array.
+    skillRun.scenarios[0]?.scenario.tests.push('added later');
+    expect(summary.skills[0]?.scenarios[0]?.tests).toEqual(['responds 201']);
   });
 
   it('survives a JSON round trip unchanged', () => {
