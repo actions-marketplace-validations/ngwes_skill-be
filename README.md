@@ -1,5 +1,7 @@
 # skill-be
 
+![skill-be: Measure, Compare, Improve](https://raw.githubusercontent.com/ngwes/skill-be/main/assets/skill-be-banner.png)
+
 <!-- docs-site:skip-start -->
 [![npm](https://img.shields.io/npm/v/@ngwes/skill-be)](https://www.npmjs.com/package/@ngwes/skill-be)
 [![CI](https://github.com/ngwes/skill-be/actions/workflows/ci.yml/badge.svg)](https://github.com/ngwes/skill-be/actions/workflows/ci.yml)
