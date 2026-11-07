@@ -4,6 +4,7 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
+  childEnv,
   executeTests,
   listTests,
   type ExecuteOptions,
@@ -97,6 +98,34 @@ describe('listTests', () => {
       ].join('\n'),
     );
     expect(await listTests(options(test, null))).toEqual(['real']);
+  });
+});
+
+describe('childEnv', () => {
+  const env = {
+    SYSTEMROOT: 'C:\\Windows',
+    COMSPEC: 'C:\\Windows\\system32\\cmd.exe',
+    Path: 'C:\\bin',
+    temp: 'C:\\tmp',
+    ANTHROPIC_API_KEY: 'sk-secret',
+    path_extra: 'not a path',
+  };
+
+  it('matches the allowed names in any case on Windows', () => {
+    expect(childEnv(env, 'win32')).toEqual({
+      SYSTEMROOT: 'C:\\Windows',
+      COMSPEC: 'C:\\Windows\\system32\\cmd.exe',
+      Path: 'C:\\bin',
+      temp: 'C:\\tmp',
+    });
+  });
+
+  it('matches the allowed names exactly elsewhere', () => {
+    expect(childEnv({ ...env, PATH: '/bin', HOME: '/home/me' }, 'linux')).toEqual({
+      Path: 'C:\\bin',
+      PATH: '/bin',
+      HOME: '/home/me',
+    });
   });
 });
 
@@ -300,6 +329,18 @@ describe('executeTests', () => {
       ],
       infraError: null,
     });
+  });
+
+  it('exits after the last test though the answer replaced process.exit', CHILD_TEST, async () => {
+    const test = await testFile(`test('one', () => {});`);
+    // Without the real exit, the interval would keep the child up until the answer timeout.
+    const answer = await answerFile(
+      'process.exit = () => {};\nsetInterval(() => {}, 1000);\nexport const result = 1;\n',
+    );
+    const started = Date.now();
+    const run = await executeTests(options(test, answer, { answerTimeoutMs: 15_000 }), ['one']);
+    expect(run).toEqual({ outcomes: [{ name: 'one', ...PASS }], infraError: null });
+    expect(Date.now() - started).toBeLessThan(7_500);
   });
 
   it('reports an infra error when the test file throws on load', CHILD_TEST, async () => {

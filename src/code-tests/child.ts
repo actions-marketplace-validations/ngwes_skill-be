@@ -12,7 +12,8 @@
  * - `{"skillBe":token,"i":0,"pass":true,"message":""}` in run mode, one per registered test in
  *   order, `i` its index; each line is flushed before the next test starts.
  * Each line is written after a line break, so output the answer left without one cannot join it.
- * After the last line the child exits with `process.exit(0)`, whatever the answer left running.
+ * After the last line the child exits with `process.exit(0)`, whatever the answer left running
+ * (the real one, taken before any test code loads, so replacing `process.exit` does not stop it).
  *
  * In run mode each test gets the answer module's exports named in `fields` (a missing one is
  * `undefined`); every test fails when the answer throws on load or has no `result` export. A test
@@ -39,8 +40,9 @@ type Fields = Record<string, unknown>;
 
 type TestFn = ReturnType<typeof registeredTests>[number]['fn'];
 
-// Taken before any test code loads, which may replace `process.stdout.write`.
+// Taken before any test code loads, which may replace `process.stdout.write` or `process.exit`.
 const writeStdout = process.stdout.write.bind(process.stdout);
+const exit = process.exit.bind(process);
 
 /** Fails the test that is running; `null` between tests, when an uncaught error is ignored. */
 let failRunning: ((error: unknown) => void) | null = null;
@@ -137,9 +139,9 @@ async function main(): Promise<void> {
 }
 
 main().then(
-  () => process.exit(0),
+  () => exit(0),
   (error: unknown) => {
     process.stderr.write(`skill-be child: ${messageOf(error)}\n`);
-    process.exit(1);
+    exit(1);
   },
 );

@@ -126,11 +126,18 @@ async function runChild(opts: ExecuteOptions, mode: 'list' | 'run'): Promise<Chi
   return { events: childEvents(result.stdout, token), result };
 }
 
-function childEnv(): NodeJS.ProcessEnv {
+/**
+ * The variables of `env` the child gets: those of the allow-list, by name, ignoring case on
+ * Windows, where a shell such as Git Bash hands them over as `SYSTEMROOT` or `COMSPEC`.
+ */
+export function childEnv(
+  env: NodeJS.ProcessEnv = process.env,
+  platform: NodeJS.Platform = process.platform,
+): NodeJS.ProcessEnv {
+  const fold = (name: string): string => (platform === 'win32' ? name.toUpperCase() : name);
+  const allowed = new Set(CHILD_ENV.map(fold));
   return Object.fromEntries(
-    Object.entries(process.env).filter(
-      ([name, value]) => CHILD_ENV.includes(name) && value !== undefined,
-    ),
+    Object.entries(env).filter(([name, value]) => allowed.has(fold(name)) && value !== undefined),
   );
 }
 
