@@ -1135,7 +1135,9 @@ Add `.skill-be/` to your `.gitignore`: the results directory is for inspection, 
 - an overview table: each skill's verdict, errors, duration and why it blocks, linked to its section;
 - a section per skill, open when the skill blocks: the gate reasons, then each scenario with its prompt, its scores per model and the grader's notes, and, folded, every rep's answer from both arms with the grader replies and, for code tests, the result and failure message of each test.
 
-The page is one file that loads nothing and runs no script, so it opens offline and still works when you move it or download it from CI ([Verify in CI](#verify-in-ci)). Like `summary.json`, it is rewritten after every skill.
+The page follows the system's light or dark setting. Cyan marks the baseline and magenta the with-skill arm, in the score tables and around the answers; red is kept for what blocks: NOT READY, failed tests, `[ERROR]` notes and scores that drop with the skill.
+
+The page is one file that loads nothing and runs no script, so it opens offline and still works when you move it or download it from CI ([Verify in CI](#verify-in-ci)). Its fonts, Press Start 2P and IBM Plex Mono (SIL Open Font License), are embedded in it, about 57 KB. Like `summary.json`, it is rewritten after every skill.
 
 `run` ends with a summary of the verdicts, the checks and the files it wrote ([sample](#run-the-benchmark)). The checks run after the benchmark, over every skill that has an eval file. A bad check setting (for example a `library` that does not exist) stops `run` with exit code 2 before the first model call.
 

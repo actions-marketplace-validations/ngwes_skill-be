@@ -334,4 +334,67 @@ describe('renderHtml', () => {
   it('follows the light or dark setting of the system', () => {
     expect(html).toContain('@media (prefers-color-scheme: dark)');
   });
+
+  describe('the look', () => {
+    const css = /<style>([\s\S]*?)<\/style>/.exec(html)?.[1] ?? '';
+
+    /** The `@font-face` rules of the page, each as its text. */
+    const fontFaces = css.match(/@font-face\s*\{[^}]*\}/g) ?? [];
+
+    /** The font a face rule embeds, decoded from its data URL. */
+    const embedded = (face: string): Buffer => {
+      const data = /url\("data:font\/woff2;base64,([A-Za-z0-9+/=]+)"\)/.exec(face);
+      expect(data, `no woff2 data URL in ${face.slice(0, 80)}`).not.toBeNull();
+      return Buffer.from(data![1]!, 'base64');
+    };
+
+    it.each([
+      ['Press Start 2P', '400'],
+      ['IBM Plex Mono', '400'],
+      ['IBM Plex Mono', '600'],
+    ])('embeds %s %s as a woff2 data URL', (family, weight) => {
+      const face = fontFaces.find(
+        (rule) =>
+          rule.includes(`font-family: "${family}"`) && rule.includes(`font-weight: ${weight};`),
+      );
+      expect(face, `no @font-face for ${family} ${weight}`).toBeDefined();
+      // Every woff2 file starts with this signature.
+      expect(embedded(face!).subarray(0, 4).toString('latin1')).toBe('wOF2');
+    });
+
+    it('loads nothing from the network, even from its CSS', () => {
+      expect(css).not.toMatch(/https?:/i);
+      expect(css).not.toMatch(/@import/i);
+      for (const url of css.match(/url\(([^)]*)\)/g) ?? []) {
+        expect(url.startsWith('url("data:')).toBe(true);
+      }
+    });
+
+    it('colours the baseline and the with-skill arm, in the scores and in the answers', () => {
+      const option = section(html, 'option');
+      expect(option).toContain(
+        '<th class="num baseline">Baseline</th><th class="num with-skill">With skill</th>',
+      );
+      expect(option).toContain('<div class="arm baseline"><h6>Baseline</h6>');
+      expect(option).toContain('<div class="arm with-skill"><h6>With skill</h6>');
+      expect(css).toMatch(/\.baseline\b[^{]*\{[^}]*var\(--baseline\)/);
+      expect(css).toMatch(/\.with-skill\b[^{]*\{[^}]*var\(--with-skill\)/);
+    });
+
+    it('defines a light theme and a dark one', () => {
+      const light = /:root\s*\{[^}]*\}/.exec(css)?.[0] ?? '';
+      const dark = /@media \(prefers-color-scheme: dark\)\s*\{\s*:root\s*\{[^}]*\}/.exec(css)?.[0];
+      expect(light).toContain('--bg: #F5EFE1');
+      expect(dark).toContain('--bg: #0B1A14');
+      for (const token of ['--fg', '--baseline', '--with-skill', '--ready', '--blocked']) {
+        expect(light).toContain(`${token}:`);
+        expect(dark).toContain(`${token}:`);
+      }
+    });
+
+    it('rounds no corner: frames step instead', () => {
+      expect(css).not.toMatch(/border-radius/);
+      expect(css).toContain('clip-path');
+    });
+  });
 });
