@@ -13,7 +13,7 @@ import { loadTypescript, type TypeScript, type TypescriptDeps } from '../checks/
 import { ConfigError, type Config, type Scenario, type SkillSuite } from '../types.js';
 import { extractAnswer, transpile } from './compile.js';
 import { executeTests, listTests, type TestOutcome } from './execute.js';
-import { installPackages, readPackageList, removePackages } from './packages.js';
+import { REMOVE_FOLDER, installPackages, readPackageList, removePackages } from './packages.js';
 
 export type CodeTestResult = { outcomes: TestOutcome[]; infraError: string | null };
 
@@ -26,9 +26,29 @@ export type CodeTests = {
    * @throws Error when the skill or the scenario has no prepared code tests.
    */
   run(skill: string, scenarioId: string, output: string): Promise<CodeTestResult>;
-  /** Deletes the run's compiled files, and the install folders unless `keepDeps`. */
+  /**
+   * Deletes the run's compiled files, and the install folders unless `keepDeps`. A folder that
+   * cannot be removed does not stop the others.
+   *
+   * @throws CleanupError naming every folder it could not remove.
+   */
   dispose(): Promise<void>;
 };
+
+/** The folders a dispose could not remove: one `could not remove <dir> (<why>)` per folder. */
+export class CleanupError extends Error {
+  override name = 'CleanupError';
+
+  constructor(readonly problems: string[]) {
+    super(problems.join('\n'));
+  }
+}
+
+/** The `warning: ...` lines of a dispose that failed, one per folder it could not remove. */
+export function cleanupWarnings(error: unknown): string[] {
+  const problems = error instanceof CleanupError ? error.problems : [messageOf(error)];
+  return problems.map((problem) => `warning: ${problem}`);
+}
 
 export type PrepareOptions = TypescriptDeps & {
   /** Keeps the install folders for the next run. */
@@ -83,8 +103,20 @@ export async function prepareCodeTests(
   const prepared = new Map<string, PreparedSuite>();
 
   const dispose = async (): Promise<void> => {
-    for (const dir of runDirs) await rm(dir, { recursive: true, force: true });
-    if (!opts.keepDeps) for (const dir of installDirs) await removePackages(dir);
+    const removals = [
+      ...[...runDirs].map((dir) => ({ dir, remove: () => rm(dir, REMOVE_FOLDER) })),
+      ...(opts.keepDeps ? [] : [...installDirs]).map((dir) => ({
+        dir,
+        remove: () => removePackages(dir),
+      })),
+    ];
+    const problems: string[] = [];
+    for (const { dir, remove } of removals) {
+      await TryAsync.runAsync(remove).onFail((error) => {
+        problems.push(`could not remove ${dir} (${messageOf(error)})`);
+      });
+    }
+    if (problems.length > 0) throw new CleanupError(problems);
   };
 
   if (testSuites.length === 0) {
@@ -157,9 +189,14 @@ export async function prepareCodeTests(
     }
     return { suites: filled, run, dispose };
   } catch (error) {
-    await dispose();
+    // The error that stopped the preparation is the one to report; a cleanup problem only warns.
+    await dispose().catch((cleanup: unknown) => cleanupWarnings(cleanup).forEach(opts.log));
     throw error;
   }
+}
+
+function messageOf(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 /** A run of a skill or scenario without prepared code tests: a programming error. */

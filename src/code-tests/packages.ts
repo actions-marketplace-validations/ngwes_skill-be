@@ -76,9 +76,15 @@ export async function installPackages(
   return { dir, reused: false };
 }
 
+/**
+ * How skill-be removes a folder it made: a folder that is already gone is fine, and a removal that
+ * fails because Windows still holds a file of it (a child that just exited) is tried again.
+ */
+export const REMOVE_FOLDER = { recursive: true, force: true, maxRetries: 5, retryDelay: 100 };
+
 /** Deletes an install folder with everything in it; a folder that is already gone is fine. */
 export function removePackages(dir: string): Promise<void> {
-  return rm(dir, { recursive: true, force: true });
+  return rm(dir, REMOVE_FOLDER);
 }
 
 /** The text of a package list, without a byte order mark. */

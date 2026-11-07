@@ -16,7 +16,7 @@ import { typecheckSkill, validateTypecheck } from './checks/typecheck.js';
 import { loadTypescript } from './checks/typescript.js';
 import { syntaxErrors } from './code-tests/compile.js';
 import { contractHints } from './code-tests/hints.js';
-import { prepareCodeTests, type CodeTests } from './code-tests/runtime.js';
+import { cleanupWarnings, prepareCodeTests, type CodeTests } from './code-tests/runtime.js';
 import { loadConfig } from './config.js';
 import { skillFingerprint } from './fingerprint.js';
 import { evaluateGate, type GateVerdict } from './gate.js';
@@ -404,15 +404,21 @@ async function runCommand(args: Args, ctx: Context): Promise<number> {
     log: ctx.err,
   });
   return withCleanup(
-    () => disposeCodeTests(preparing),
+    () => disposeCodeTests(preparing, ctx),
     async () => benchmark(args, ctx, { config, all: project.all, existing }, await preparing),
   );
 }
 
-/** Disposes of the code tests once they are prepared; a preparation that failed cleaned up. */
-async function disposeCodeTests(preparing: Promise<CodeTests> | null): Promise<void> {
+/**
+ * Disposes of the code tests once they are prepared; a preparation that failed cleaned up. A
+ * folder it cannot remove is a warning on stderr: the command keeps its own exit code.
+ */
+async function disposeCodeTests(
+  preparing: Promise<CodeTests> | null,
+  ctx: Context,
+): Promise<void> {
   const codeTests = await preparing?.catch(() => null);
-  await codeTests?.dispose();
+  await codeTests?.dispose().catch((error: unknown) => cleanupWarnings(error).forEach(ctx.err));
 }
 
 /**
@@ -594,7 +600,7 @@ async function triageCommand(args: Args, ctx: Context): Promise<number> {
   below.onSome((value) => (options.below = value));
   samples.onSome((value) => (options.samples = value));
   const { reportPath, items } = await withCleanup(
-    () => disposeCodeTests(preparing),
+    () => disposeCodeTests(preparing, ctx),
     () => triage(config, selected, options),
   );
 
