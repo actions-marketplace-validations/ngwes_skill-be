@@ -1,6 +1,11 @@
 import ts from 'typescript';
 import { describe, expect, it } from 'vitest';
-import { ANSWER_LANGUAGES, extractAnswer, transpile } from '../src/code-tests/compile.js';
+import {
+  ANSWER_LANGUAGES,
+  extractAnswer,
+  syntaxErrors,
+  transpile,
+} from '../src/code-tests/compile.js';
 
 const URL_OF_TESTING = 'file:///skill-be/dist/testing.js';
 
@@ -113,5 +118,16 @@ describe('transpile', () => {
     ].join('\n');
     const out = transpile(ts, source, 'a.test.ts', URL_OF_TESTING);
     expect(out).not.toContain('import');
+  });
+});
+
+describe('syntaxErrors', () => {
+  it('returns none for code that parses, type errors included', () => {
+    expect(syntaxErrors(ts, 'const n: number = "two";\n', 'a.ts')).toEqual([]);
+  });
+
+  it('returns each syntax error with its line', () => {
+    const errors = syntaxErrors(ts, 'const a = 1;\nconst b = (;\n', 'a.test.ts');
+    expect(errors).toEqual([{ line: 2, message: 'error TS1109: Expression expected.' }]);
   });
 });

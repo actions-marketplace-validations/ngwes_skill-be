@@ -6,13 +6,17 @@
  */
 
 import { realpathSync } from 'node:fs';
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Option, Try, TryAsync } from '@ngwes/mini-fp';
 import { isConfigProblem } from './adapters/index.js';
-import { coverage, validateCoverage } from './checks/coverage.js';
+import { apiWords, coverage, validateCoverage } from './checks/coverage.js';
 import { typecheckSkill, validateTypecheck } from './checks/typecheck.js';
+import { loadTypescript } from './checks/typescript.js';
+import { syntaxErrors } from './code-tests/compile.js';
+import { contractHints } from './code-tests/hints.js';
+import { prepareCodeTests, type CodeTests } from './code-tests/runtime.js';
 import { loadConfig } from './config.js';
 import { skillFingerprint } from './fingerprint.js';
 import { evaluateGate, type GateVerdict } from './gate.js';
@@ -25,6 +29,7 @@ import {
   skillBeVersion,
   verifyResults,
   writeResultFile,
+  type ResultFile,
   type SkillEntry,
 } from './result-file.js';
 import { modelLabels, resultsTimestamp, runSkill, type SkillRun } from './runner.js';
@@ -34,7 +39,16 @@ import { ConfigError, type Config, type SkillSuite } from './types.js';
 
 export type Writer = { write(text: string): unknown };
 
-export type Io = { stdout: Writer; stderr: Writer; cwd: string };
+export type Io = {
+  stdout: Writer;
+  stderr: Writer;
+  cwd: string;
+  /**
+   * Aborted when the process is told to stop (Ctrl+C): a run then writes no more results. The
+   * entry point exits with the signal's code.
+   */
+  signal?: AbortSignal;
+};
 
 const USAGE = `Usage: skill-be <command> [options]
 
@@ -46,7 +60,7 @@ Commands:
                      under the results directory, updates the result file, then runs the checks.
   verify             Without a model call: checks that the result file matches the current
                      skills, evals and config and records every skill READY, then runs the checks.
-  check              Runs the typecheck and coverage checks.
+  check              Runs the typecheck and coverage checks, and parses the code tests.
   triage [skill...]  Proposes a classification for each failing criterion of the latest run.
                      Never blocks.
 
@@ -55,6 +69,7 @@ Options:
   --reps <n>         run: generations per arm per scenario, instead of the config's
   --concurrency <n>  run: model calls in flight at once, instead of the config's
   --html             run: also writes results.html beside summary.json, with every answer
+  --keep-deps        run: keeps the installed test packages in .skill-be/deps for the next run
   --below <pct>      triage: also triage criteria that scored under pct% with the skill
   --samples <n>      triage: fresh with-skill samples per failing criterion (default: 2)
   -h, --help         Shows this help
@@ -82,7 +97,7 @@ type Args = {
  * `--`), and whether it takes skill names.
  */
 const SYNTAX: Record<CommandName, { options: string[]; flags: string[]; skills: boolean }> = {
-  run: { options: ['config', 'reps', 'concurrency'], flags: ['html'], skills: true },
+  run: { options: ['config', 'reps', 'concurrency'], flags: ['html', 'keep-deps'], skills: true },
   verify: { options: ['config'], flags: [], skills: false },
   check: { options: ['config'], flags: [], skills: false },
   triage: { options: ['config', 'below', 'samples'], flags: [], skills: true },
@@ -97,7 +112,14 @@ type Context = {
   /** A path as the user reads it: relative to the working directory when it is inside it. */
   show: (file: string) => string;
   cwd: string;
+  /** Throws {@link Stopped} once the process is told to stop. */
+  throwIfStopped: () => void;
 };
+
+/** The process was told to stop: the command ends without writing more. */
+class Stopped extends Error {
+  override name = 'Stopped';
+}
 
 const COMMANDS: Record<CommandName, (args: Args, ctx: Context) => Promise<number>> = {
   run: runCommand,
@@ -125,8 +147,13 @@ export async function main(argv: string[], io: Io): Promise<number> {
         return inside ? relative : file;
       },
       cwd: io.cwd,
+      throwIfStopped: () => {
+        if (io.signal?.aborted === true) throw new Stopped('stopped');
+      },
     });
   }).onFail((error) => {
+    // The entry point exits with the signal's code; the code returned here is not used.
+    if (error instanceof Stopped) return 130;
     if (error instanceof UsageError) {
       err(`skill-be: ${error.message}`);
       err('Run "skill-be --help" for usage.');
@@ -294,6 +321,60 @@ async function runChecks(config: Config, suites: SkillSuite[]): Promise<ChecksOu
   return { lines, blockers };
 }
 
+/** Printed once by `run`, before the first skill with code tests. */
+const SANDBOX_NOTE =
+  "note: code tests run the model's code on this machine, in a separate process without your " +
+  "environment's secrets. It is not a sandbox (see https://github.com/ngwes/skill-be/issues/20).";
+
+function hasContracts(suite: SkillSuite): boolean {
+  return suite.scenarios.some((scenario) => scenario.output !== null);
+}
+
+/**
+ * The hint-word warnings of the output contracts of `suites`, against the coverage check's API
+ * names when coverage is configured, else against each skill's own code. None, and no API listed,
+ * when no suite has a contract.
+ */
+async function hintWarnings(config: Config, suites: SkillSuite[]): Promise<string[]> {
+  const contracted = suites.filter(hasContracts);
+  if (contracted.length === 0) return [];
+  const coverageConfig = config.checks.coverage;
+  const vocabulary = coverageConfig === false ? null : await apiWords(coverageConfig, config.root);
+  return contracted.flatMap((suite) => contractHints(suite, vocabulary, config.codeTests.allow));
+}
+
+/**
+ * Parses every TypeScript file of the code tests of `suites` (test files and helpers), without
+ * running or installing anything: a syntax error blocks. No line at all when no suite has a
+ * contract.
+ */
+async function parseCodeTests(
+  config: Config,
+  suites: SkillSuite[],
+  show: (file: string) => string,
+): Promise<ChecksOutcome> {
+  if (!suites.some(hasContracts)) return { lines: [], blockers: [] };
+  const ts = await loadTypescript('code tests', config.root, {});
+  const files = [...new Set(suites.flatMap((suite) => suite.codeFiles))].filter((file) =>
+    file.endsWith('.ts'),
+  );
+  const problems: string[] = [];
+  for (const file of files) {
+    const errors = syntaxErrors(ts, await readFile(file, 'utf8'), file);
+    problems.push(...errors.map(({ line, message }) => `${show(file)}:${line}: ${message}`));
+  }
+  if (problems.length === 0) {
+    return { lines: [`code tests: ${files.length} test file(s) parse`], blockers: [] };
+  }
+  return {
+    lines: [
+      `code tests: ${problems.length} syntax error(s)`,
+      ...problems.map((problem) => `  - ${problem}`),
+    ],
+    blockers: ['the code tests'],
+  };
+}
+
 /** The last line of a command's output, and its exit code. */
 function conclude(ctx: Context, blockers: string[]): number {
   ctx.out(blockers.length === 0 ? 'Result: pass' : `Result: blocked by ${blockers.join(', ')}`);
@@ -313,11 +394,57 @@ async function runCommand(args: Args, ctx: Context): Promise<number> {
   // Before the first model call: a broken result file or check setting must not cost a run.
   const existing = await readResultFile(config.resultFile);
   await validateChecks(config);
+  for (const warning of await hintWarnings(config, project.selected)) ctx.err(`warning: ${warning}`);
+  // So is a code test that cannot be installed, compiled or listed.
+  const preparing = prepareCodeTests(config, project.selected, {
+    keepDeps: args.flags.has('keep-deps'),
+    log: ctx.err,
+  });
+  return withCleanup(
+    async () => {
+      const codeTests = await preparing.catch(() => null);
+      await codeTests?.dispose();
+    },
+    async () => benchmark(args, ctx, { config, all: project.all, existing }, await preparing),
+  );
+}
+
+/**
+ * Cleanups of the commands in flight, which the entry point awaits before it exits on a signal.
+ * Each returns the same promise however often it is called.
+ */
+const pendingCleanups = new Set<() => Promise<void>>();
+
+/**
+ * Runs `work`, then `cleanUp` once, whether `work` succeeds or throws. The entry point also runs
+ * `cleanUp` when it stops on a signal while `work` is in flight.
+ */
+async function withCleanup<T>(cleanUp: () => Promise<void>, work: () => Promise<T>): Promise<T> {
+  let cleaning: Promise<void> | undefined;
+  const once = (): Promise<void> => (cleaning ??= cleanUp());
+  pendingCleanups.add(once);
+  try {
+    return await work();
+  } finally {
+    await once().finally(() => pendingCleanups.delete(once));
+  }
+}
+
+/**
+ * Runs the selected skills with their prepared code tests, writes the reports, the summary and
+ * the result file after each, then runs the checks.
+ */
+async function benchmark(
+  args: Args,
+  ctx: Context,
+  project: { config: Config; all: SkillSuite[]; existing: ResultFile | null },
+  codeTests: CodeTests,
+): Promise<number> {
+  const { config, existing } = project;
+  const suites = codeTests.suites;
   const version = await skillBeVersion();
   // The files as the run reads them, before a long run gives anyone time to edit them.
-  const fingerprints = await Promise.all(
-    project.selected.map((suite) => skillFingerprint(config, suite)),
-  );
+  const fingerprints = await Promise.all(suites.map((suite) => skillFingerprint(config, suite)));
 
   const timestamp = resultsTimestamp();
   const runDir = path.join(config.results, timestamp);
@@ -328,8 +455,15 @@ async function runCommand(args: Args, ctx: Context): Promise<number> {
   const entries: Record<string, SkillEntry> = {};
   const reports: string[] = [];
 
-  for (const [i, suite] of project.selected.entries()) {
-    const run = await runSkill(suite, config, { log: ctx.err, timestamp });
+  let noted = false;
+  for (const [i, suite] of suites.entries()) {
+    if (!noted && hasContracts(suite)) {
+      ctx.err(SANDBOX_NOTE);
+      noted = true;
+    }
+    const run = await runSkill(suite, config, { log: ctx.err, timestamp, codeTests });
+    // A run stopped on a signal ends with killed calls: its scores must not reach any file.
+    ctx.throwIfStopped();
     const gate = evaluateGate(run, config.gate);
     runs.push(run);
     gates.set(run.skill, gate);
@@ -424,9 +558,11 @@ async function verifyCommand(args: Args, ctx: Context): Promise<number> {
 
 async function checkCommand(args: Args, ctx: Context): Promise<number> {
   const { config, all } = await loadProject(args, ctx);
+  for (const warning of await hintWarnings(config, all)) ctx.err(`warning: ${warning}`);
   const checks = await runChecks(config, all);
-  for (const line of checks.lines) ctx.out(line);
-  return conclude(ctx, checks.blockers);
+  const parsed = await parseCodeTests(config, all, ctx.show);
+  for (const line of [...checks.lines, ...parsed.lines]) ctx.out(line);
+  return conclude(ctx, [...checks.blockers, ...parsed.blockers]);
 }
 
 async function triageCommand(args: Args, ctx: Context): Promise<number> {
@@ -460,24 +596,40 @@ function isEntryPoint(): boolean {
   );
 }
 
+/** Set by the first {@link stop}. */
+let stopping = false;
+
 /**
- * Exits with `code` once the in-flight model calls are killed: they run in their own process
+ * Exits with `code` once the in-flight model calls are killed (they run in their own process
  * group on POSIX, so Ctrl+C does not reach them, and work a config error left queued would keep
- * starting them.
+ * starting them) and the commands in flight have cleaned up: a run removes its compiled tests
+ * and, without `--keep-deps`, its installed test packages. Only the first call counts: a command
+ * a signal stops still returns a code of its own afterwards.
  */
 function stop(code: number): void {
+  if (stopping) return;
+  stopping = true;
   killActiveChildren();
   process.exitCode = code;
-  // Let stdout and stderr flush what was written to them first.
-  process.stdout.write('', () => process.stderr.write('', () => process.exit(code)));
+  void Promise.allSettled([...pendingCleanups].map((cleanUp) => cleanUp())).then(() =>
+    // Let stdout and stderr flush what was written to them first.
+    process.stdout.write('', () => process.stderr.write('', () => process.exit(code))),
+  );
 }
 
 if (isEntryPoint()) {
-  process.once('SIGINT', () => stop(130));
-  process.once('SIGTERM', () => stop(143));
+  const stopped = new AbortController();
+  // `once`: a second Ctrl+C exits at once, even while a cleanup hangs.
+  const onSignal = (code: number) => (): void => {
+    stopped.abort();
+    stop(code);
+  };
+  process.once('SIGINT', onSignal(130));
+  process.once('SIGTERM', onSignal(143));
   void main(process.argv.slice(2), {
     stdout: process.stdout,
     stderr: process.stderr,
     cwd: process.cwd(),
+    signal: stopped.signal,
   }).then(stop);
 }

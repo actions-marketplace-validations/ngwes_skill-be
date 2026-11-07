@@ -4,9 +4,10 @@
  * stop it from running.
  */
 
+import type { CompilerOptions } from 'typescript';
 import { Option } from '@ngwes/mini-fp';
 import { extractCodeBlocks } from '../checks/code-blocks.js';
-import type { TypeScript } from '../checks/typescript.js';
+import { format, type TypeScript } from '../checks/typescript.js';
 
 /** The languages a code block may be in to count as the answer. */
 export const ANSWER_LANGUAGES = ['ts', 'typescript', 'js', 'javascript'];
@@ -39,14 +40,40 @@ export function transpile(
 ): string {
   const { outputText } = ts.transpileModule(source, {
     fileName,
-    compilerOptions: {
-      module: ts.ModuleKind.ESNext,
-      target: ts.ScriptTarget.ES2022,
-      esModuleInterop: true,
-    },
+    compilerOptions: compilerOptions(ts),
   });
   return outputText.replace(
     TESTING_IMPORT,
     (_match, lead: string) => `${lead}${JSON.stringify(testingUrl)}`,
   );
+}
+
+/**
+ * The syntax errors {@link transpile} meets in `source`, each with its 1-based line; none when the
+ * source parses. Type errors are not looked for.
+ */
+export function syntaxErrors(
+  ts: TypeScript,
+  source: string,
+  fileName: string,
+): { line: number; message: string }[] {
+  const { diagnostics = [] } = ts.transpileModule(source, {
+    fileName,
+    reportDiagnostics: true,
+    compilerOptions: compilerOptions(ts),
+  });
+  return diagnostics.map((diagnostic) => ({
+    line: Option.from(diagnostic.file)
+      .bind((file) =>
+        Option.from(diagnostic.start).map(
+          (start) => file.getLineAndCharacterOfPosition(start).line + 1,
+        ),
+      )
+      .orElse(1),
+    message: format(ts, diagnostic),
+  }));
+}
+
+function compilerOptions(ts: TypeScript): CompilerOptions {
+  return { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022, esModuleInterop: true };
 }
