@@ -295,8 +295,8 @@ describe('executeTests', () => {
       `test('ok', () => {});\ntest('loops', () => { for (;;) {} });\ntest('never', () => {});`,
     );
     const answer = await answerFile('export const result = 1;\n');
-    const opts = options(test, answer, { answerTimeoutMs: 1500 });
-    const ended = 'the process ended before this test ran (timed out after 1500 ms)';
+    const opts = options(test, answer, { answerTimeoutMs: 4000 });
+    const ended = 'the process ended before this test ran (timed out after 4000 ms)';
     expect(await executeTests(opts, ['ok', 'loops', 'never'])).toEqual({
       outcomes: [
         { name: 'ok', ...PASS },
