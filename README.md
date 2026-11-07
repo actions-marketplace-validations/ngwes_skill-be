@@ -1088,7 +1088,7 @@ blocks, 2 for a usage or config error.
 
 A skill folder with no eval file is skipped with a warning (`warning: skill "x" has no eval file`) by every command. Naming a skill that has no `SKILL.md` is a config error. Options take `--name value` or `--name=value`.
 
-`run` and `triage` install the package lists of code tests under `.skill-be/deps` and delete them when they end, unless `--keep-deps` is given ([Libraries the code may import](#libraries-the-code-may-import)). `verify` installs nothing and takes no `--keep-deps`. `check` parses the test files, warns about hint words in the output contracts, and installs and runs nothing.
+`run` and `triage` install the package lists of code tests under `.skill-be/deps` and delete them when they end, unless `--keep-deps` is given ([Libraries the code may import](#libraries-the-code-may-import)). `verify` installs nothing and takes no `--keep-deps`. `check` parses the test files, reads the package lists, warns about hint words in the output contracts, and installs and runs nothing.
 
 `--reps` and `--concurrency` apply to that run only. The result file does not record `reps` or `gradings`, so run the benchmark you commit with the config's values.
 
@@ -1653,7 +1653,7 @@ The wrapper is `@ngwes/skill-be/testing`, and it is all a test file needs:
 
 A test fails when it throws or rejects, when it runs longer than `codeTests.testTimeoutSeconds` (10 by default), or when an error is thrown and left uncaught while it runs. All the tests of an answer must finish within `codeTests.answerTimeoutSeconds` (60), or skill-be kills the process: the tests that had finished keep their result, and the others fail.
 
-The test files and helpers are compiled with TypeScript, without a type check, so the optional `typescript` peer is required. `check` parses all of them, and a syntax error blocks it (exit code 1). A test file that throws when it loads stops `run` before the first model call (exit code 2).
+The test files and helpers are compiled with TypeScript, without a type check, so the optional `typescript` peer is required. `check` parses all of them, and a syntax error blocks it (exit code 1). A test file that throws when it loads, or that registers no test, stops `run` before the first model call (exit code 2).
 
 `verify` only hashes files. The fingerprint of a skill with code tests covers its folder under the tests folder, `_shared` and its package list, so changing a test after the last run makes `verify` fail until you run again. For code tests it runs nothing, and needs neither TypeScript nor npm.
 
@@ -1677,7 +1677,7 @@ The list is a JSON file with one section per language. Only `npm` is read:
 { "npm": ["@ngwes/mini-fp@^2.0.0", "express@5"] }
 ```
 
-An entry is anything `npm install` accepts: a version range, a folder, a `.tgz` made by `npm pack`, a git URL. A path (it starts with `.` or `/`, or with a drive letter) is relative to the list file.
+An entry is anything `npm install` accepts: a version range, a folder, a `.tgz` made by `npm pack`, a git URL. A path (it starts with `.` or `/`, or with a drive letter) is relative to the list file, and so is the path of a `file:` entry (`file:../lib`).
 
 The list a skill with output contracts uses is the first of these that applies:
 
@@ -1693,11 +1693,11 @@ codeTests:
     signup: ./signup-packages.json
 ```
 
-A list that the YAML names and that does not exist is a config error. So is a section other than `npm`: it is rejected with a pointer to [the languages issue](https://github.com/ngwes/skill-be/issues/32).
+A list that the YAML names and that does not exist is a config error. So is a list that is not valid JSON, or a section other than `npm`: it is rejected with a pointer to [the languages issue](https://github.com/ngwes/skill-be/issues/32). `check` reads every list and reports these errors (exit code 2) without installing anything.
 
-Before the first model call, `run` installs each distinct list into its own folder, `.skill-be/deps/<hash>/`, and prints `installed the test packages of <list> in <folder>` on stderr (`reused …` when it keeps a folder from an earlier run). Skills with the same list share it. The compiled tests and the answers run in a folder inside it, so both import from it. `npm` must be on the PATH, and the install needs the network unless every entry is local. A failed install stops the command with exit code 2.
+Before the first model call, `run` installs each distinct list into its own folder, `.skill-be/deps/<hash>/`. When the list has packages, it prints `installed the test packages of <list> in <folder>` on stderr (`reused …` when it keeps a folder from an earlier run); a list with no package, or no list at all, prints nothing. Skills with the same list share it. The compiled tests and the answers run in a folder inside it, so both import from it. `npm` must be on the PATH, and the install needs the network unless every entry is local. npm runs in that folder, so skill-be copies your project's `.npmrc`, when there is one next to `skill-be.yaml`, into it first: a private registry or its token applies to the install. A failed install stops the command with exit code 2, and its folder is deleted, so the next command installs again from scratch.
 
-When the command ends, the folder is deleted. `skill-be run --keep-deps` and `skill-be triage --keep-deps` keep it, and the next command reuses it while the entries of the list are the same. skill-be compares the entries, not what is behind them: after you repack a `.tgz` under the same name, delete `.skill-be/deps`. `verify` takes no `--keep-deps`, since it installs nothing.
+When the command ends, the folder is deleted. A folder skill-be cannot delete (a file still held open, for example) is a warning on stderr, `warning: could not remove <folder> (<reason>)`, and does not change the exit code. `skill-be run --keep-deps` and `skill-be triage --keep-deps` keep it, and the next command reuses it while the entries of the list are the same. skill-be compares the entries, not what is behind them: after you repack a `.tgz` under the same name, delete `.skill-be/deps`. `verify` takes no `--keep-deps`, since it installs nothing.
 
 **A library kept as TypeScript source cannot be listed as it is.** Node 20 runs the code with no TypeScript loader, so `import { Money } from 'tiny-money'` needs JavaScript. List a built folder or an `npm pack` file. For `tiny-money` of the [first example](#example-test-a-skill-end-to-end), compile `lib/index.ts` into a folder, add a `package.json` to it (a `name`, `"type": "module"` and a `main` of `index.js`), then list that folder:
 
@@ -1731,7 +1731,7 @@ The model's mistakes fail tests. What skill-be could not run is an error, not a 
 | A test throws, or runs longer than `codeTests.testTimeoutSeconds` | That test fails |
 | The code never returns, runs out of memory or crashes the process | The tests that had finished keep their result; the others fail |
 | The tests could not run: the process cannot start, or the answer cannot be written to the run folder | An error: the tests count as 0, it adds to the skill's error count, and `gate.blockOnErrors` blocks on it |
-| Before the first model call: `typescript` missing, a package list missing or invalid, a failed install, a test file that throws when it loads | A config error, exit code 2, no model call |
+| Before the first model call: `typescript` missing, a package list missing or invalid, a failed install, a test file that throws when it loads or registers no test | A config error, exit code 2, no model call |
 
 ### Triage of code tests
 
