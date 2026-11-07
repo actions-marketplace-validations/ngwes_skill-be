@@ -23,7 +23,7 @@
  */
 
 import { pathToFileURL } from 'node:url';
-import { registeredTests } from '../testing.js';
+import { registeredTests, type RegisteredTest } from './registry.js';
 
 type Request = {
   mode: 'list' | 'run';
@@ -38,7 +38,7 @@ type Outcome = { pass: boolean; message: string };
 
 type Fields = Record<string, unknown>;
 
-type TestFn = ReturnType<typeof registeredTests>[number]['fn'];
+type TestFn = RegisteredTest['fn'];
 
 // Taken before any test code loads, which may replace `process.stdout.write` or `process.exit`.
 const writeStdout = process.stdout.write.bind(process.stdout);

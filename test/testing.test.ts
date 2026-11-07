@@ -1,8 +1,15 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { registeredTests, resetTests, test, tests } from '../src/testing.js';
+import { registeredTests, resetTests } from '../src/code-tests/registry.js';
+import { test, tests } from '../src/testing.js';
 
 beforeEach(() => {
   resetTests();
+});
+
+describe('@ngwes/skill-be/testing', () => {
+  it('exports test and tests, and nothing of the registry', async () => {
+    expect(Object.keys(await import('../src/testing.js')).sort()).toEqual(['test', 'tests']);
+  });
 });
 
 describe('test', () => {
@@ -56,13 +63,15 @@ describe('the registry', () => {
     test('from the first instance', () => {});
     vi.resetModules();
     const other = await import('../src/testing.js');
-    expect(other.registeredTests).not.toBe(registeredTests);
+    const otherRegistry = await import('../src/code-tests/registry.js');
+    expect(other.test).not.toBe(test);
+    expect(otherRegistry.registeredTests).not.toBe(registeredTests);
     other.test('from the second instance', () => {});
     expect(registeredTests().map((registered) => registered.name)).toEqual([
       'from the first instance',
       'from the second instance',
     ]);
-    expect(other.registeredTests().map((registered) => registered.name)).toEqual([
+    expect(otherRegistry.registeredTests().map((registered) => registered.name)).toEqual([
       'from the first instance',
       'from the second instance',
     ]);
