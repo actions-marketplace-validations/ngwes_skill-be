@@ -260,6 +260,24 @@ describe('evaluateGate', () => {
       expect(result.blocks).toEqual([{ kind: 'error' }]);
     });
 
+    it('names the code tests in the error reason when any scenario of the run has tests', () => {
+      const result = evaluateGate(
+        run(
+          [
+            scenarioResult('s1', ['c1'], [model('m1', [[0, 100]], 1)]),
+            scenarioResult('s2', [], [model('m1', [[0, 100]], 1)], false, ['responds 201']),
+          ],
+          2,
+        ),
+        { ...ALL_ON, blockOnZero: false },
+      );
+      expect(result.ready).toBe(false);
+      expect(result.reasons).toEqual([
+        '**[ERROR]** 2 error(s): outputs that could not be generated or graded, or code tests that could not run; their lines were counted as 0 (see the scenario notes).',
+      ]);
+      expect(result.blocks).toEqual([{ kind: 'error' }]);
+    });
+
     it('is switched off by blockOnErrors: false', () => {
       const result = evaluateGate(
         run([scenarioResult('s1', ['c1'], [model('m1', [[0, 100]], 3)])], 3),

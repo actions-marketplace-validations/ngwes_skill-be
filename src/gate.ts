@@ -45,8 +45,9 @@ export function fmtDelta(delta: number): string {
  *   skill than in the baseline on a model.
  *
  * A test is named `[test] <name>` in the reasons, like a criterion otherwise. The error comes
- * first, then each scenario's scored lines in order, a line's zero block before its regressions,
- * which go in model order.
+ * first (worded for code tests when any scenario of the run has tests; the original text
+ * otherwise), then each scenario's scored lines in order, a line's zero block before its
+ * regressions, which go in model order.
  */
 export function evaluateGate(run: SkillRun, gate: Config['gate']): GateVerdict {
   const reasons: string[] = [];
@@ -57,8 +58,11 @@ export function evaluateGate(run: SkillRun, gate: Config['gate']): GateVerdict {
   };
 
   if (gate.blockOnErrors && run.errorCount > 0) {
+    const hasTests = run.scenarios.some(({ scenario }) => scenario.tests.length > 0);
     block(
-      `**[ERROR]** ${run.errorCount} output(s) could not be generated or graded; their criteria were counted as 0 (see the scenario notes).`,
+      hasTests
+        ? `**[ERROR]** ${run.errorCount} error(s): outputs that could not be generated or graded, or code tests that could not run; their lines were counted as 0 (see the scenario notes).`
+        : `**[ERROR]** ${run.errorCount} output(s) could not be generated or graded; their criteria were counted as 0 (see the scenario notes).`,
       { kind: 'error' },
     );
   }
