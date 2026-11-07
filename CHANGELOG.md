@@ -1,3 +1,10 @@
+## [1.4.1](https://github.com/ngwes/skill-be/compare/v1.4.0...v1.4.1) (2026-11-07)
+
+
+### Bug Fixes
+
+* say no grading happened when no scenario has criteria ([8fe84d1](https://github.com/ngwes/skill-be/commit/8fe84d1cbccaa5c0236a3454a1b6f62a83eccb5e))
+
 # [1.4.0](https://github.com/ngwes/skill-be/compare/v1.3.0...v1.4.0) (2026-11-07)
 
 
