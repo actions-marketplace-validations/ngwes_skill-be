@@ -1143,7 +1143,7 @@ A skill is NOT READY when any enabled rule holds:
 
 1. **Zero** (`gate.blockOnZero`): a criterion scores 0% with the skill on every model under test.
 2. **Critical regression** (`gate.regressionOnCritical`): in a scenario marked `"critical": true`, a criterion scores lower with the skill than in the baseline, on any model.
-3. **Errors** (`gate.blockOnErrors`): any output could not be generated or graded.
+3. **Errors** (`gate.blockOnErrors`): any output could not be generated or graded, or its code tests could not run.
 
 Otherwise it is READY. A criterion's score for an arm is the share of reps whose verdict is YES, rounded to a whole percent. A generation that fails is not retried; it is an error, and its criteria count as 0.
 
@@ -1167,6 +1167,12 @@ or, for a blocked skill:
 - **BLOCKED** (regression): `split-the-bill` / claude-sonnet-5-5 — *"The shares it returns always add up exactly to the total"*: 100% → 33% (-67pp)
 
 **NOT READY**
+```
+
+In a run with [code tests](#code-tests), the error line names them too:
+
+```
+- **[ERROR]** 2 error(s): outputs that could not be generated or graded, or code tests that could not run; their lines were counted as 0 (see the scenario notes).
 ```
 
 Per-output problems appear as `[ERROR]` and `[NOTE]` lines under the scenario tables.
@@ -1771,6 +1777,19 @@ skillgrade is the better fit when the agent has to act: tasks that edit a worksp
 skill-be is the better fit when the question is whether a skill is worth shipping: its effect against a baseline, regressions on critical scenarios, and a gate that costs nothing to run in CI.
 
 Some of skillgrade's strengths are open ideas for skill-be: [deterministic graders](https://github.com/ngwes/skill-be/issues/7), [JUnit reports](https://github.com/ngwes/skill-be/issues/8), [drafting evals from a SKILL.md](https://github.com/ngwes/skill-be/issues/9), [agentic tasks](https://github.com/ngwes/skill-be/issues/10), [a discovery mode](https://github.com/ngwes/skill-be/issues/11) and [more adapters](https://github.com/ngwes/skill-be/issues/12).
+
+[promptfoo](https://www.promptfoo.dev/) is a general tool for testing prompts and models. It runs every prompt against every provider and checks each answer with [assertions](https://www.promptfoo.dev/docs/configuration/expected-outputs/): string and JSON checks, a rubric graded by a model (`llm-rubric`), and custom JavaScript or Python functions. It shows the results in a local web viewer, runs in CI, and also does red teaming.
+
+The two overlap. Two prompts in promptfoo, one with the skill text and one without, are a baseline and a with-skill arm; `llm-rubric` plays the part of skill-be's criteria; a JavaScript assertion can take the code out of an answer and test it. What skill-be adds is what is specific to skills:
+
+- baseline versus with-skill as the shape of every scenario, with the skill pasted in by `withSkillTemplate`;
+- a gate that blocks a criterion at 0% with the skill and a critical scenario that gets worse with it, not only a pass rate;
+- `verify`, which checks a committed result file in CI without a model call;
+- the typecheck of the examples in each `SKILL.md`, the coverage check, and triage of failing criteria;
+- adapters that run Claude Code, pi and opencode without the user's settings, tools or project files;
+- [code tests](#code-tests) that run each answer in its own process, with a package list and an output contract that both arms get.
+
+promptfoo is the better fit for comparing many prompts or providers at once, for red teaming, or when skills are a small part of what you test. skill-be is the better fit when the question is whether a skill is worth shipping.
 
 ## License
 
