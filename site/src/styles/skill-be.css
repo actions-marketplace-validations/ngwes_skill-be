@@ -1,0 +1,536 @@
+/*
+ * skill-be theme for Starlight, after the skill-be style guide: a CRT terminal with crisp pixels and
+ * restrained neon. Phosphor green is the identity and the structure, amber a small attention accent,
+ * and one functional red is kept for blocking states. Cyan and magenta mean baseline and with skill
+ * in skill-be's reports, so the docs do not use them.
+ *
+ * Fonts (self-hosted, see astro.config.mjs): Press Start 2P for the title, short headings and
+ * labels, IBM Plex Mono for everything else.
+ *
+ * This file is not in a cascade layer, so it wins over Starlight's layered styles.
+ */
+
+/* ---------- Tokens ---------- */
+
+:root {
+	/* Brand tokens (the style guide): fills, frames and large shapes */
+	--sb-crt-black: #0b1a14;
+	--sb-phosphor: #8faf87;
+	--sb-amber: #dbd089;
+	--sb-cream: #f5efe1;
+	--sb-deep-ink: #102a27;
+
+	/* One logical pixel, the size of every corner step */
+	--sb-px: 2px;
+
+	--sb-font-pixel: 'Press Start 2P', 'IBM Plex Mono', ui-monospace, monospace;
+	--sl-font: 'IBM Plex Mono';
+	--sl-font-mono: 'IBM Plex Mono';
+}
+
+/* Dark (the default) */
+:root {
+	--sl-color-white: #f5efe1;
+	--sl-color-gray-1: #ece5d4;
+	--sl-color-gray-2: #e3dccb;
+	--sl-color-gray-3: #a3b5a6;
+	--sl-color-gray-4: #5e7a69;
+	--sl-color-gray-5: #2c4a40;
+	--sl-color-gray-6: #102a27;
+	--sl-color-black: #0b1a14;
+
+	--sl-color-accent-low: #1b3a2c;
+	--sl-color-accent: #8faf87;
+	--sl-color-accent-high: #a9c7a0;
+
+	--sl-color-text: var(--sl-color-gray-2);
+	--sl-color-text-accent: #8faf87;
+	--sl-color-text-invert: #0b1a14;
+	--sl-color-bg: #0b1a14;
+	--sl-color-bg-nav: #102a27;
+	--sl-color-bg-sidebar: #102a27;
+	--sl-color-bg-inline-code: #1d3b33;
+	--sl-color-bg-accent: #8faf87;
+	--sl-color-hairline-light: #2c4a40;
+	--sl-color-hairline: #2c4a40;
+	--sl-color-hairline-shade: #8faf87;
+	--sl-color-backdrop-overlay: rgb(11 26 20 / 0.8);
+
+	/* Asides, badges and notices. Blue and purple (Starlight's note and tip) stay green. */
+	--sl-color-green-low: #16301f;
+	--sl-color-green: #8faf87;
+	--sl-color-green-high: #8faf87;
+	--sl-color-blue-low: #16301f;
+	--sl-color-blue: #8faf87;
+	--sl-color-blue-high: #8faf87;
+	--sl-color-purple-low: #16301f;
+	--sl-color-purple: #8faf87;
+	--sl-color-purple-high: #8faf87;
+	--sl-color-orange-low: #2c2a14;
+	--sl-color-orange: #dbd089;
+	--sl-color-orange-high: #dbd089;
+	/* The functional red, outside the brand palette: blocking states only */
+	--sl-color-red-low: #341a18;
+	--sl-color-red: #e8877c;
+	--sl-color-red-high: #e8877c;
+
+	/* Flat: depth is made of steps, never of shadows */
+	--sl-shadow-sm: none;
+	--sl-shadow-md: none;
+	--sl-shadow-lg: none;
+
+	/* Frames */
+	--sb-frame: #8faf87;
+	--sb-frame-dim: #3e5e4c;
+	--sb-frame-code: #3e5e4c;
+	--sb-code-bg: #102a27;
+	--sb-code-header: #0b1a14;
+	--sb-scanline: rgb(143 175 135 / 0.05);
+}
+
+:root[data-theme='light'] {
+	--sl-color-white: #102a27;
+	--sl-color-gray-1: #15302c;
+	--sl-color-gray-2: #1a3531;
+	--sl-color-gray-3: #4a6159;
+	--sl-color-gray-4: #7f9087;
+	--sl-color-gray-5: #cdc5af;
+	--sl-color-gray-6: #e6decb;
+	--sl-color-gray-7: #ede6d4;
+	--sl-color-black: #f5efe1;
+
+	--sl-color-accent-low: #dce6d0;
+	--sl-color-accent: #3a6234;
+	--sl-color-accent-high: #2f5229;
+
+	--sl-color-text-accent: #3a6234;
+	--sl-color-text-invert: #f5efe1;
+	--sl-color-bg: #f5efe1;
+	--sl-color-bg-nav: #f5efe1;
+	--sl-color-bg-sidebar: #f5efe1;
+	--sl-color-bg-inline-code: #e6decb;
+	--sl-color-bg-accent: #3a6234;
+	--sl-color-hairline-light: #cdc5af;
+	--sl-color-hairline: #cdc5af;
+	--sl-color-hairline-shade: #102a27;
+	--sl-color-backdrop-overlay: rgb(16 42 39 / 0.6);
+
+	--sl-color-green-low: #dce6d0;
+	--sl-color-green: #3a6234;
+	--sl-color-green-high: #2f5229;
+	--sl-color-blue-low: #dce6d0;
+	--sl-color-blue: #3a6234;
+	--sl-color-blue-high: #2f5229;
+	--sl-color-purple-low: #dce6d0;
+	--sl-color-purple: #3a6234;
+	--sl-color-purple-high: #2f5229;
+	--sl-color-orange-low: #efe6bc;
+	--sl-color-orange: #8a7a1e;
+	--sl-color-orange-high: #5e520c;
+	--sl-color-red-low: #f3d9d2;
+	--sl-color-red: #a3372e;
+	--sl-color-red-high: #982f27;
+
+	--sb-frame: #102a27;
+	--sb-frame-dim: #7f9087;
+	--sb-frame-code: #7f9087;
+	--sb-code-bg: #ede6d4;
+	--sb-code-header: #e3dbc6;
+	--sb-scanline: transparent;
+}
+
+/* Badges: cream text on every variant, in both themes */
+:root {
+	--sl-badge-default-text: #f5efe1;
+	--sl-badge-note-text: #f5efe1;
+	--sl-badge-tip-text: #f5efe1;
+	--sl-badge-success-text: #f5efe1;
+	--sl-badge-caution-text: #f5efe1;
+	--sl-badge-danger-text: #f5efe1;
+}
+
+/* ---------- Shapes ---------- */
+
+/* Square pixels: no rounded corner anywhere (frames get stepped corners below) */
+*,
+*::before,
+*::after {
+	border-radius: 0;
+}
+
+/*
+ * Stepped corners, two steps of one logical pixel. The clip cuts the outer corner; the frame's
+ * inner corner pixel is painted in the frame colour (--sb-c) so the outline reads as a staircase.
+ */
+.expressive-code .frame,
+.starlight-aside,
+site-search button[data-open-modal],
+site-search dialog,
+.pagination-links a,
+mobile-starlight-toc .toggle,
+.sl-menu-button,
+.sl-badge,
+.card,
+.sl-link-card,
+.sl-link-button,
+starlight-file-tree {
+	--s1: var(--sb-px);
+	--s2: calc(2 * var(--sb-px));
+	clip-path: polygon(
+		0 var(--s2),
+		var(--s1) var(--s2),
+		var(--s1) var(--s1),
+		var(--s2) var(--s1),
+		var(--s2) 0,
+		calc(100% - var(--s2)) 0,
+		calc(100% - var(--s2)) var(--s1),
+		calc(100% - var(--s1)) var(--s1),
+		calc(100% - var(--s1)) var(--s2),
+		100% var(--s2),
+		100% calc(100% - var(--s2)),
+		calc(100% - var(--s1)) calc(100% - var(--s2)),
+		calc(100% - var(--s1)) calc(100% - var(--s1)),
+		calc(100% - var(--s2)) calc(100% - var(--s1)),
+		calc(100% - var(--s2)) 100%,
+		var(--s2) 100%,
+		var(--s2) calc(100% - var(--s1)),
+		var(--s1) calc(100% - var(--s1)),
+		var(--s1) calc(100% - var(--s2)),
+		0 calc(100% - var(--s2))
+	);
+}
+
+/* The inner corner pixels (--sb-corners, a background layer), for frames with a border of one
+ * logical pixel */
+.starlight-aside,
+site-search button[data-open-modal],
+site-search dialog,
+.pagination-links a,
+mobile-starlight-toc .toggle,
+.sl-menu-button,
+.card,
+.sl-link-card,
+starlight-file-tree {
+	--sb-corners: linear-gradient(var(--sb-c) 0 0) left top / var(--sb-px) var(--sb-px) no-repeat,
+		linear-gradient(var(--sb-c) 0 0) right top / var(--sb-px) var(--sb-px) no-repeat,
+		linear-gradient(var(--sb-c) 0 0) left bottom / var(--sb-px) var(--sb-px) no-repeat,
+		linear-gradient(var(--sb-c) 0 0) right bottom / var(--sb-px) var(--sb-px) no-repeat;
+}
+.starlight-aside,
+site-search dialog,
+.pagination-links a,
+mobile-starlight-toc .toggle,
+.card,
+.sl-link-card,
+starlight-file-tree {
+	border: var(--sb-px) solid var(--sb-c);
+}
+
+/* ---------- Header ---------- */
+
+header.header {
+	border-bottom: var(--sb-px) solid var(--sb-frame);
+	/* Sparse scanlines, dark theme only, and only here */
+	background-image: repeating-linear-gradient(
+		to bottom,
+		transparent 0 3px,
+		var(--sb-scanline) 3px 4px
+	);
+}
+
+.site-title {
+	gap: 0.75rem;
+	color: var(--sl-color-text-accent);
+}
+.site-title img {
+	width: 40px;
+	height: 40px;
+	image-rendering: pixelated;
+}
+.site-title span {
+	font-family: var(--sb-font-pixel);
+	font-size: 0.875rem;
+	font-weight: 400;
+	font-synthesis: none;
+	line-height: 1;
+}
+@media (min-width: 50rem) {
+	.site-title span {
+		font-size: 1rem;
+	}
+}
+
+/* The search box */
+@media (min-width: 50rem) {
+	site-search button[data-open-modal] {
+		--sb-c: var(--sb-frame-dim);
+		border: var(--sb-px) solid var(--sb-c);
+		background: var(--sb-corners), var(--sl-color-black);
+		color: var(--sl-color-gray-2);
+	}
+	site-search button[data-open-modal]:hover {
+		--sb-c: var(--sl-color-accent);
+	}
+	site-search button[data-open-modal] > kbd {
+		background-color: var(--sl-color-gray-6);
+		color: var(--sl-color-gray-2);
+	}
+}
+site-search dialog {
+	--sb-c: var(--sb-frame);
+	background: var(--sb-corners), var(--sl-color-black);
+	box-shadow: none;
+}
+/* No blur behind the dialog: a flat overlay */
+site-search dialog::backdrop {
+	-webkit-backdrop-filter: none;
+	backdrop-filter: none;
+}
+#starlight__search {
+	--pagefind-ui-border-width: 2px;
+	--pagefind-ui-border-radius: 0;
+	--pagefind-ui-border: var(--sb-frame-dim);
+}
+#starlight__search .pagefind-ui__result-title:not(:where(.pagefind-ui__result-nested *)),
+#starlight__search .pagefind-ui__result-nested {
+	background-color: var(--sl-color-gray-6);
+}
+
+/* ---------- Type ---------- */
+
+body {
+	font-family: var(--__sl-font);
+}
+
+/* Pixel headings: the page title and h2, small and short. h3 and below stay in IBM Plex Mono. */
+h1#_top,
+.sl-markdown-content h1:not(:where(.not-content *)),
+.sl-markdown-content h2:not(:where(.not-content *)) {
+	font-family: var(--sb-font-pixel);
+	font-weight: 400;
+	font-synthesis: none;
+	line-height: 1.5;
+	letter-spacing: 0;
+	overflow-wrap: break-word;
+}
+:root {
+	--sl-text-h1: 1.125rem;
+	--sl-text-h2: 0.875rem;
+	--sl-text-h3: 1.125rem;
+	--sl-text-h4: 1rem;
+	--sl-text-h5: 1rem;
+	--sl-line-height-headings: 1.35;
+}
+@media (min-width: 50em) {
+	:root {
+		--sl-text-h1: 1.375rem;
+		--sl-text-h2: 1rem;
+		--sl-text-h3: 1.25rem;
+		--sl-text-h4: 1.125rem;
+	}
+}
+h1#_top {
+	color: var(--sl-color-text-accent);
+}
+.sl-markdown-content .sl-heading-wrapper.level-h2 {
+	padding-bottom: 0.5rem;
+	border-bottom: var(--sb-px) solid var(--sl-color-hairline);
+}
+/* A pixel square in front of each h2, like the section labels of the style guide */
+.sl-markdown-content h2:not(:where(.not-content *))::before {
+	content: '';
+	display: inline-block;
+	width: 0.5em;
+	height: 0.5em;
+	margin-inline-end: 0.75em;
+	vertical-align: 0.15em;
+	background-color: var(--sl-color-text-accent);
+}
+.sl-markdown-content :is(h1, h2) code {
+	font-size: 0.875em;
+}
+
+/* Short labels in the pixel font: the sidebar group, "On this page", table headers */
+.sidebar-content .group-label .large,
+starlight-toc h2,
+mobile-starlight-toc .toggle,
+.sl-markdown-content th:not(:where(.not-content *)) {
+	font-family: var(--sb-font-pixel);
+	font-weight: 400;
+	font-synthesis: none;
+	letter-spacing: 0;
+}
+.sidebar-content .group-label .large,
+starlight-toc h2 {
+	font-size: 0.6875rem;
+	line-height: 1.6;
+	color: var(--sl-color-text-accent);
+}
+mobile-starlight-toc .toggle {
+	font-size: 0.625rem;
+	line-height: 1.6;
+}
+.sl-markdown-content th:not(:where(.not-content *)) {
+	font-size: 0.625rem;
+	line-height: 1.8;
+	color: var(--sl-color-white);
+	vertical-align: bottom;
+}
+.sl-markdown-content th code {
+	font-family: var(--__sl-font-mono);
+}
+
+/* Links stay underlined; the underline is a pixel thick */
+.sl-markdown-content a:not(:where(.not-content *)) {
+	text-decoration-thickness: 1px;
+	text-underline-offset: 0.2em;
+}
+
+/* Keyboard focus: a square pixel outline */
+:focus-visible {
+	outline: var(--sb-px) solid var(--sl-color-accent);
+	outline-offset: var(--sb-px);
+}
+
+/* ---------- Content ---------- */
+
+.sl-markdown-content code:not(:where(.not-content *)) {
+	color: var(--sl-color-white);
+}
+
+.sl-markdown-content hr:not(:where(.not-content *)) {
+	border: 0;
+	border-top: var(--sb-px) dashed var(--sl-color-hairline);
+}
+
+.sl-markdown-content blockquote:not(:where(.not-content *)) {
+	border-inline-start: var(--sb-px) solid var(--sb-frame-dim);
+}
+
+/* Tables: a heavy rule under the header, one-pixel rules between rows */
+.sl-markdown-content table:not(:where(.not-content *)) {
+	font-size: var(--sl-text-sm);
+}
+.sl-markdown-content th:not(:where(.not-content *)) {
+	border-bottom: var(--sb-px) solid var(--sb-frame);
+}
+.sl-markdown-content td:not(:where(.not-content *)) {
+	border-bottom: 1px solid var(--sl-color-hairline);
+}
+
+/* Images keep their own pixels; the banner and screenshots sit flat */
+.sl-markdown-content img:not(:where(.not-content *)) {
+	border: 0;
+}
+
+/* ---------- Code blocks ---------- */
+
+.expressive-code .frame {
+	--sb-c: var(--sb-frame-code);
+}
+.expressive-code .frame::after {
+	content: '';
+	position: absolute;
+	inset: 0;
+	z-index: 2;
+	pointer-events: none;
+	background: linear-gradient(var(--sb-c) 0 0) left var(--sb-px) top var(--sb-px) / var(--sb-px)
+			var(--sb-px) no-repeat,
+		linear-gradient(var(--sb-c) 0 0) right var(--sb-px) top var(--sb-px) / var(--sb-px) var(--sb-px)
+			no-repeat,
+		linear-gradient(var(--sb-c) 0 0) left var(--sb-px) bottom var(--sb-px) / var(--sb-px)
+			var(--sb-px) no-repeat,
+		linear-gradient(var(--sb-c) 0 0) right var(--sb-px) bottom var(--sb-px) / var(--sb-px)
+			var(--sb-px) no-repeat;
+}
+
+/* ---------- Asides ---------- */
+
+.starlight-aside {
+	--sb-c: var(--sl-color-asides-border);
+	background: var(--sb-corners), var(--sb-aside-bg);
+	color: var(--sl-color-white);
+}
+.starlight-aside--note,
+.starlight-aside--tip {
+	--sb-aside-bg: var(--sl-color-green-low);
+}
+.starlight-aside--caution {
+	--sb-aside-bg: var(--sl-color-orange-low);
+}
+.starlight-aside--danger {
+	--sb-aside-bg: var(--sl-color-red-low);
+}
+.starlight-aside__title {
+	font-family: var(--sb-font-pixel);
+	font-size: 0.75rem;
+	font-weight: 400;
+	font-synthesis: none;
+	line-height: 1.6;
+}
+
+/* ---------- Navigation ---------- */
+
+.sidebar-content a[aria-current='page'] {
+	font-weight: 600;
+}
+
+.pagination-links a {
+	--sb-c: var(--sb-frame-dim);
+	background: var(--sb-corners), var(--sl-color-black);
+}
+.pagination-links a:hover {
+	--sb-c: var(--sl-color-accent);
+}
+.pagination-links .link-title {
+	font-size: var(--sl-text-lg);
+	font-weight: 600;
+}
+
+mobile-starlight-toc .toggle {
+	--sb-c: var(--sb-frame-dim);
+	background: var(--sb-corners), var(--sl-color-black);
+}
+mobile-starlight-toc details[open] .toggle,
+mobile-starlight-toc details .toggle:hover {
+	--sb-c: var(--sl-color-accent);
+}
+
+/* The menu button of the phone layout */
+.sl-menu-button {
+	--sb-c: var(--sb-frame);
+	border: var(--sb-px) solid var(--sb-c);
+	background: var(--sb-corners), var(--sl-color-black);
+	color: var(--sl-color-white);
+}
+.sl-menu-button:has(~ :popover-open) {
+	--sb-c: var(--sl-color-text-invert);
+	background: var(--sb-corners), var(--sl-color-text-accent);
+	color: var(--sl-color-text-invert);
+}
+
+/* Starlight components the content may use later: square, framed, flat */
+.card,
+.sl-link-card,
+starlight-file-tree {
+	--sb-c: var(--sb-frame-dim);
+	background: var(--sb-corners), var(--sl-color-gray-6);
+	box-shadow: none;
+}
+.sl-badge {
+	font-family: var(--__sl-font-mono);
+}
+
+@media (prefers-reduced-motion: reduce) {
+	*,
+	*::before,
+	*::after {
+		transition-duration: 0s !important;
+	}
+}
+
+@media print {
+	header.header {
+		background-image: none;
+	}
+}
