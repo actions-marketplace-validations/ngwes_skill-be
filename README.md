@@ -1295,6 +1295,70 @@ checks:
 coverage: 1 API name(s) not mentioned in any SKILL.md or eval file, not blocking: Money.allocate
 ```
 
+### Checks for another language
+
+For a library in another language, both checks take a `command` instead of the TypeScript preset. This example checks a Python library, `tiny_money`, with two scripts next to `skill-be.yaml`:
+
+```yaml
+checks:
+  typecheck:
+    command: python scripts/check_block.py
+  coverage:
+    command: python scripts/list_api.py
+    blocking: true
+```
+
+`scripts/check_block.py` gets one block on stdin and fails when it does not parse:
+
+```python
+import ast
+import os
+import sys
+
+# skill-be sends every block that has a language tag: check only the Python ones
+if os.environ.get("SKILL_BE_LANG") not in ("python", "py"):
+    sys.exit(0)
+
+try:
+    ast.parse(sys.stdin.read())
+except SyntaxError as error:
+    print(f"line {error.lineno}: {error.msg}", file=sys.stderr)
+    sys.exit(1)
+```
+
+`scripts/list_api.py` prints the API, one name per line:
+
+```python
+import inspect
+
+import tiny_money
+
+for name in tiny_money.__all__:
+    print(name)
+    exported = getattr(tiny_money, name)
+    if inspect.isclass(exported):
+        for member in vars(exported):
+            if not member.startswith("_"):
+                print(member)  # "allocate", not "Money.allocate": see below
+```
+
+What the tables above leave implicit:
+
+- **Every tagged block goes to the typecheck command.** That includes `bash`, `json` and `yaml` blocks, not only the library's language: every fenced block with a language tag that is not marked `skip`. The script reads `SKILL_BE_LANG` and exits 0 for the languages it does not check, as `check_block.py` does.
+- **The command replaces the whole preset.** Nothing of the TypeScript preset applies: imports do not carry over from earlier blocks, the library's exports are not in scope, and no error is tolerated. Each block is checked alone, so a block that uses a name from an earlier block must import or define it again, or the script must allow for it.
+- **How the command runs.** It is started without a shell, in the config file's directory, the same rules as the [command adapter](#command): quote a word that contains spaces, and wrap pipes or redirects in a script. Each block may take 60 seconds. A problem shows the block's `SKILL.md` line and the end of the command's stderr, or of its stdout when stderr is empty:
+
+  ```
+  typecheck: 1 problem(s)
+    - skill "money", SKILL.md line 12: the typecheck command failed (exit code 1): line 1: '(' was never closed
+  ```
+
+- **Coverage matches each printed name exactly as printed.** The TypeScript preset reports `Class.member` and counts a mention of the member name; a command gets no such rule. Print `allocate`, not `Money.allocate`, if a skill that mentions `allocate` should cover it. Names in `ignore` are matched as printed too.
+
+`ast.parse` only checks the syntax. To check types as well, have the script write the block to a temporary file and run a type checker such as mypy on it.
+
+[Code tests](#code-tests) stay TypeScript only: see [Other languages](#other-languages).
+
 ## Triage
 
 `skill-be triage [skill...]` looks closer at the failures of the latest run: the newest directory under `results` with a `summary.json`. It never blocks (exit code 0), but it needs a run to read, so run the benchmark first.
