@@ -11,6 +11,8 @@ export default defineConfig({
 	integrations: [
 		starlight({
 			title: 'skill-be',
+			// The pixel-art icon of the skill-be banner (assets/skill-be-banner.png), 192x192.
+			favicon: '/favicon.png',
 			description:
 				'A CLI that benchmarks Agent Skills: baseline versus with-skill, LLM-graded and gated, on any harness.',
 			social: [
