@@ -4,3 +4,5 @@ dist/
 # Local acceptance runs: configs, results and a library copy that stay on one machine.
 examples/.acceptance/
 docs/superpowers/
+# Local Claude Code settings and skills (such as .claude/skills/herdr); never committed.
+.claude/
