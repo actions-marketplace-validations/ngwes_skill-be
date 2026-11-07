@@ -38,6 +38,16 @@ const KNOWN_KEYS = [
   'gate',
   'checks',
   'triage',
+  'tests',
+  'codeTests',
+];
+
+const CODE_TESTS_KEYS = [
+  'packages',
+  'packagesBySkill',
+  'testTimeoutSeconds',
+  'answerTimeoutSeconds',
+  'allow',
 ];
 
 export type ConfigDeps = {
@@ -91,8 +101,8 @@ function parseDocument(text: string): Either<string, Option<unknown>> {
 type Mapping = Record<string, unknown>;
 
 /**
- * The config of a document. The structure comes first: the top-level keys and the `checks` and
- * `triage` sections. Then every value, in the order of the config's keys.
+ * The config of a document. The structure comes first: the top-level keys and the `checks`,
+ * `triage` and `codeTests` sections. Then every value, in the order of the config's keys.
  */
 function buildConfig(
   document: Option<unknown>,
@@ -110,9 +120,10 @@ function buildConfig(
         raw: knownKeys(raw, KNOWN_KEYS),
         checks: section(raw.checks, 'checks', ['typecheck', 'coverage']),
         triage: section(raw.triage, 'triage', ['model']),
+        codeTests: section(raw.codeTests, 'codeTests', CODE_TESTS_KEYS),
       }),
     )
-    .bind(({ raw, checks, triage }) =>
+    .bind(({ raw, checks, triage, codeTests }) =>
       all({
         skills: requiredPath(raw.skills, 'skills', root),
         evals: requiredPath(raw.evals, 'evals', root),
@@ -121,7 +132,7 @@ function buildConfig(
         reps: positiveInteger(raw.reps, 'reps', 3),
         gradings: positiveInteger(raw.gradings, 'gradings', 3),
         concurrency: positiveInteger(raw.concurrency, 'concurrency', 4),
-        timeoutSeconds: parseTimeout(raw.timeoutSeconds),
+        timeoutSeconds: timeoutSeconds(raw.timeoutSeconds, 'timeoutSeconds', 120),
         results: optionalPath(raw.results, 'results', root).map((results) =>
           results.orElse(() => path.join(root, '.skill-be', 'results')),
         ),
@@ -134,6 +145,7 @@ function buildConfig(
         typecheck: parseTypecheck(checks.typecheck, () => hasTypescript(root)),
         coverage: parseCoverage(checks.coverage),
         triageModel: optional(triage.model, (model) => adapterEntry(model, 'triage.model')),
+        codeTests: parseCodeTests(raw.tests, codeTests, root),
       }),
     )
     .map(({ graderPrompt, typecheck, coverage, triageModel, ...values }) => ({
@@ -160,16 +172,71 @@ function buildConfig(
  */
 const MAX_TIMEOUT_SECONDS = Math.floor((2 ** 31 - 1) / 1000);
 
-function parseTimeout(raw: unknown): Checked<number> {
-  return positiveNumber(raw, 'timeoutSeconds', 120).bind((seconds) =>
+/** A positive number of seconds a Node timer can hold. */
+function timeoutSeconds(raw: unknown, key: string, fallback: number): Checked<number> {
+  return positiveNumber(raw, key, fallback).bind((seconds) =>
     check(
       seconds <= MAX_TIMEOUT_SECONDS,
       seconds,
       () =>
-        `"timeoutSeconds" must be at most ${MAX_TIMEOUT_SECONDS} (about 24.8 days) ` +
-        `(got ${seconds})`,
+        `"${key}" must be at most ${MAX_TIMEOUT_SECONDS} (about 24.8 days) (got ${seconds})`,
     ),
   );
+}
+
+/**
+ * The code tests settings: the top-level `tests` folder and the `codeTests` section. The package
+ * list stays null when the YAML does not name one: the default list is looked up where it is used.
+ */
+function parseCodeTests(
+  rawTests: unknown,
+  settings: Mapping,
+  root: string,
+): Checked<Config['codeTests']> {
+  return all({
+    tests: optionalPath(rawTests, 'tests', root),
+    packages: optionalPath(settings.packages, 'codeTests.packages', root),
+    packagesBySkill: parsePackagesBySkill(settings.packagesBySkill, root),
+    testTimeoutSeconds: timeoutSeconds(
+      settings.testTimeoutSeconds,
+      'codeTests.testTimeoutSeconds',
+      10,
+    ),
+    answerTimeoutSeconds: timeoutSeconds(
+      settings.answerTimeoutSeconds,
+      'codeTests.answerTimeoutSeconds',
+      60,
+    ),
+    allow: stringList(settings.allow, 'codeTests.allow'),
+  }).map(({ tests, packages, ...values }) => ({
+    tests: tests.match<string | null>(
+      (folder) => folder,
+      () => null,
+    ),
+    packages: packages.match<string | null>(
+      (file) => file,
+      () => null,
+    ),
+    ...values,
+  }));
+}
+
+function parsePackagesBySkill(raw: unknown, root: string): Checked<Record<string, string>> {
+  return optional(raw, (value) =>
+    mapping(value, '"codeTests.packagesBySkill"').bind((bySkill) =>
+      all<Record<string, string>>(
+        Object.fromEntries(
+          Object.entries(bySkill).map(([skill, file]) => [
+            skill,
+            nonEmptyString(
+              file,
+              () => `"codeTests.packagesBySkill.${skill}" must be a non-empty string`,
+            ).map((found) => path.resolve(root, found)),
+          ]),
+        ),
+      ),
+    ),
+  ).map((found) => found.orElse({}));
 }
 
 function parseModels(raw: unknown): Checked<AdapterSettings[]> {

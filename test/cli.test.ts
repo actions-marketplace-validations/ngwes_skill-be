@@ -1,5 +1,6 @@
+import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { mkdir, mkdtemp, readdir, readFile, rm, unlink, writeFile } from 'node:fs/promises';
+import { cp, mkdir, mkdtemp, readdir, readFile, rm, unlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -7,12 +8,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { main } from '../src/cli.js';
 import { loadConfig } from '../src/config.js';
 import { skillFingerprint } from '../src/fingerprint.js';
+import { runProcess } from '../src/process.js';
 import type { RunSummary } from '../src/report.js';
 import type { ResultFile } from '../src/result-file.js';
 import { loadSuites } from '../src/suite.js';
 
 const BIN = fileURLToPath(new URL('./fixtures/bin/', import.meta.url));
 const TYPECHECK = fileURLToPath(new URL('./fixtures/typecheck/', import.meta.url));
+const CODE_TESTS = fileURLToPath(new URL('./fixtures/code-tests/', import.meta.url));
+const BUILT_CLI = fileURLToPath(new URL('../dist/cli.js', import.meta.url));
 const READY_LINE = '**READY** — No universal 0% criteria. No critical regressions.';
 
 /** A command line for a fixture script, run with this node; YAML-quoted. */
@@ -555,7 +559,283 @@ describe('skill-be triage', SLOW, () => {
   });
 });
 
+/** True when `npm` runs; the cases that install the fixture's package list skip otherwise. */
+const hasNpm = await runProcess({
+  bin: 'npm',
+  args: ['--version'],
+  stdin: '',
+  timeoutMs: 30_000,
+}).then(
+  (result) => result.code === 0,
+  () => false,
+);
+
+// An npm install, then a child per answer and arm.
+const INSTALLS = { timeout: 120_000 };
+
+const NOTE =
+  "note: code tests run the model's code on this machine, in a separate process without your " +
+  "environment's secrets. It is not a sandbox (see https://github.com/ngwes/skill-be/issues/20).";
+
+/** The code-tests fixture, copied to the temporary root. */
+const copyCodeTests = (): Promise<void> => cp(CODE_TESTS, root, { recursive: true });
+
+const depsDir = (): string => path.join(root, '.skill-be', 'deps');
+
+/** The install folders under `.skill-be/deps`; none when it does not exist. */
+async function installFolders(): Promise<string[]> {
+  return existsSync(depsDir()) ? readdir(depsDir()) : [];
+}
+
+const modelCalled = (): boolean => existsSync(path.join(root, 'fake-model.called'));
+
+describe('code tests', () => {
+  it.skipIf(!hasNpm)('run grades code tests end to end', INSTALLS, async () => {
+    await copyCodeTests();
+
+    const { code, stdout, stderr } = await cli('run');
+
+    expect(code).toBe(0);
+    expect(stdout).toMatch(/sum: READY/);
+    expect(stderr.split('\n').filter((line) => line === NOTE)).toHaveLength(1);
+    expect(stderr).not.toContain('warning:');
+    const summary = await readJson<RunSummary>(path.join(await runDir(), 'summary.json'));
+    const [scenario] = summary.skills[0]!.scenarios;
+    expect(scenario?.criteria).toEqual([]);
+    expect(scenario?.tests).toEqual(['adds two numbers']);
+    expect(scenario?.models[0]?.criteria).toEqual([{ baselinePct: 0, withSkillPct: 100 }]);
+    expect((await resultFile()).skills.sum?.ready).toBe(true);
+  });
+
+  it.skipIf(!hasNpm)('run --keep-deps keeps .skill-be/deps', INSTALLS, async () => {
+    await copyCodeTests();
+
+    const { code } = await cli('run', '--keep-deps');
+
+    expect(code).toBe(0);
+    const [folder, ...others] = await installFolders();
+    expect(others).toEqual([]);
+    const kept = path.join(depsDir(), folder!);
+    expect(existsSync(path.join(kept, 'node_modules', 'local-lib', 'index.js'))).toBe(true);
+    // The compiled tests and answers of the run are removed all the same.
+    expect((await readdir(kept)).filter((name) => name.startsWith('run-'))).toEqual([]);
+  });
+
+  it.skipIf(!hasNpm)('run removes .skill-be/deps without the flag', INSTALLS, async () => {
+    await copyCodeTests();
+
+    const { code, stderr } = await cli('run');
+
+    expect(code).toBe(0);
+    expect(stderr).toContain('installed the test packages of');
+    expect(await installFolders()).toEqual([]);
+  });
+
+  it(
+    'run stops with exit 2 before any model call when a test file throws on load',
+    INSTALLS,
+    async () => {
+      await copyCodeTests();
+      // Nothing to install, so the case needs no npm.
+      await unlink(path.join(root, 'test-packages.json'));
+      const testFile = path.join(root, 'skill-tests', 'sum', 'adds.test.ts');
+      await writeFile(testFile, "throw new Error('broken on purpose');\n");
+
+      const { code, stderr } = await cli('run');
+
+      expect(code).toBe(2);
+      expect(stderr).toContain('broken on purpose');
+      expect(stderr).toContain(testFile);
+      expect(modelCalled()).toBe(false);
+      expect(existsSync(resultsDir())).toBe(false);
+      expect(await installFolders()).toEqual([]);
+    },
+  );
+
+  it(
+    'run stops with exit 2 before any model call when a test file registers no tests',
+    INSTALLS,
+    async () => {
+      await copyCodeTests();
+      await unlink(path.join(root, 'test-packages.json'));
+      const testFile = path.join(root, 'skill-tests', 'sum', 'adds.test.ts');
+      await writeFile(testFile, "import { test } from '@ngwes/skill-be/testing';\n");
+
+      const { code, stderr } = await cli('run');
+
+      expect(code).toBe(2);
+      expect(stderr).toContain(`skill-be: ${testFile}: registers no tests`);
+      expect(modelCalled()).toBe(false);
+      expect(existsSync(resultsDir())).toBe(false);
+      expect(await installFolders()).toEqual([]);
+    },
+  );
+
+  it.skipIf(!hasNpm)(
+    'triage runs fresh samples against a failing code test and cleans up',
+    INSTALLS,
+    async () => {
+      await copyCodeTests();
+      // Without its marker sentence the skill no longer helps: both arms multiply.
+      await writeFile(path.join(root, 'skills', 'sum', 'SKILL.md'), '# Sum\n');
+      expect((await cli('run')).code).toBe(1);
+
+      const triaged = await cli('triage', '--samples', '1');
+
+      expect(triaged.code).toBe(0);
+      expect(triaged.stdout).toContain('sum [adds] fake-model "[test] adds two numbers"');
+      expect(triaged.stderr.split('\n').filter((line) => line === NOTE)).toHaveLength(1);
+      const reports = (await readdir(await runDir())).filter((name) => name.startsWith('triage-'));
+      const report = await readFile(path.join(await runDir(), reports[0]!), 'utf8');
+      expect(report).toContain('### Sample 1 — test: FAIL');
+      expect(report).toContain('result(1, 2) returned 2, expected 3');
+      expect(await installFolders()).toEqual([]);
+
+      expect((await cli('triage', '--samples', '1', '--keep-deps')).code).toBe(0);
+      const [folder, ...others] = await installFolders();
+      expect(others).toEqual([]);
+      const kept = path.join(depsDir(), folder!);
+      expect((await readdir(kept)).filter((name) => name.startsWith('run-'))).toEqual([]);
+    },
+  );
+
+  it.skipIf(!hasNpm)(
+    'run removes .skill-be/deps when it is interrupted',
+    INSTALLS,
+    async () => {
+      await copyCodeTests();
+      const child = spawn(
+        process.execPath,
+        ['--require', path.join(BIN, 'sigint-on-file.cjs'), BUILT_CLI, 'run'],
+        {
+          cwd: root,
+          env: {
+            ...process.env,
+            SKILL_BE_FIXTURE_HANG: '1',
+            SKILL_BE_SIGINT_WHEN: path.join(root, 'fake-model.called'),
+          },
+          stdio: ['ignore', 'ignore', 'pipe'],
+        },
+      );
+      let stderr = '';
+      child.stderr.setEncoding('utf8').on('data', (chunk: string) => (stderr += chunk));
+
+      const code = await new Promise<number | null>((resolve) => child.on('exit', resolve));
+
+      expect(code).toBe(130);
+      // The run got as far as installing, so the folder it removed did exist.
+      expect(stderr).toContain('installed the test packages of');
+      expect(modelCalled()).toBe(true);
+      expect(await installFolders()).toEqual([]);
+      expect(existsSync(path.join(root, 'skill-be.result.json'))).toBe(false);
+    },
+  );
+
+  it('check warns about a contract that names the skill\'s vocabulary', SLOW, async () => {
+    await copyCodeTests();
+    const evalFile = path.join(root, 'evals', 'sum.json');
+    const evals = await readJson<{ scenarios: { output: Record<string, string> }[] }>(evalFile);
+    evals.scenarios[0]!.output.result = 'a function named result, (a, b) => number';
+    await writeFile(evalFile, JSON.stringify(evals, null, 2));
+
+    const { code, stdout, stderr } = await cli('check');
+
+    expect(code).toBe(0);
+    expect(stderr).toContain(
+      'warning: skill "sum" / scenario "adds": output.result names "result", ' +
+        'which the task prompt does not use.',
+    );
+    expect(stdout).toContain('code tests: 2 test file(s) parse');
+    expect(modelCalled()).toBe(false);
+    expect(await installFolders()).toEqual([]);
+  });
+
+  it('check passes the fixture without a warning', SLOW, async () => {
+    await copyCodeTests();
+
+    const { code, stdout, stderr } = await cli('check');
+
+    expect(code).toBe(0);
+    expect(stderr).not.toContain('warning:');
+    expect(stdout).toContain('code tests: 2 test file(s) parse');
+  });
+
+  it('check exits 2 on a package list that is not valid JSON', SLOW, async () => {
+    await copyCodeTests();
+    const list = path.join(root, 'test-packages.json');
+    await writeFile(list, '{ "npm": [');
+
+    const { code, stdout, stderr } = await cli('check');
+
+    expect(code).toBe(2);
+    expect(stderr).toContain(`skill-be: ${list}: invalid JSON (`);
+    expect(stdout).toBe('');
+    expect(await installFolders()).toEqual([]);
+  });
+
+  it('check exits 2 on a package list with a section for another language', SLOW, async () => {
+    await copyCodeTests();
+    const list = path.join(root, 'test-packages.json');
+    await writeFile(list, JSON.stringify({ npm: ['./local-lib'], pip: ['requests'] }));
+
+    const { code, stderr } = await cli('check');
+
+    expect(code).toBe(2);
+    expect(stderr).toContain(`skill-be: ${list}: "pip" packages are not supported yet`);
+  });
+
+  it('check exits 1 when a test helper does not parse, naming its line', SLOW, async () => {
+    await copyCodeTests();
+    const helpers = path.join(root, 'skill-tests', 'sum', 'helpers.ts');
+    await writeFile(helpers, 'export const pairs = [\n  [1, 2],\n  [3, 4\n;\n');
+
+    const { code, stdout } = await cli('check');
+
+    expect(code).toBe(1);
+    expect(stdout).toMatch(/code tests: \d+ syntax error\(s\)/);
+    expect(stdout).toContain(`  - ${path.join('skill-tests', 'sum', 'helpers.ts')}:4: error TS`);
+    expect(stdout).toContain('Result: blocked by the code tests');
+  });
+
+  it('check prints no code tests line for judge-only skills', SLOW, async () => {
+    await makeProject();
+
+    const { stdout } = await cli('check');
+
+    expect(stdout).not.toContain('code tests');
+  });
+
+  it.skipIf(!hasNpm)('verify fails after a test helper changes', INSTALLS, async () => {
+    await copyCodeTests();
+    expect((await cli('run')).code).toBe(0);
+    expect((await cli('verify')).code).toBe(0);
+
+    const helpers = path.join(root, 'skill-tests', 'sum', 'helpers.ts');
+    await writeFile(helpers, `${await readFile(helpers, 'utf8')}\nexport const more = [[5, 6]];\n`);
+    const stale = await cli('verify');
+
+    expect(stale.code).toBe(1);
+    expect(stale.stdout).toContain('skill "sum": changed since its last run');
+  });
+});
+
 describe('usage', () => {
+  it('--keep-deps is rejected by verify', async () => {
+    const { code, stderr } = await cli('verify', '--keep-deps');
+
+    expect(code).toBe(2);
+    expect(stderr).toContain('unknown option --keep-deps for "verify"');
+  });
+
+  it('lists --keep-deps', async () => {
+    const { stdout } = await cli('--help');
+
+    expect(stdout).toContain(
+      '  --keep-deps        run, triage: keeps the installed test packages in .skill-be/deps for ' +
+        'the next run',
+    );
+  });
+
   const helps = [['--help'], ['-h'], ['help'], ['run', '--help']];
   it.each(helps)('%s prints the usage', async (...a) => {
     const { code, stdout } = await cli(...a);

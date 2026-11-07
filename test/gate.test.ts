@@ -27,8 +27,16 @@ const scenarioResult = (
   criteria: string[],
   models: ModelResult[],
   critical = false,
+  tests: string[] = [],
 ): ScenarioResult => {
-  const scenario: Scenario = { id, critical, prompt: `Task for ${id}`, criteria };
+  const scenario: Scenario = {
+    id,
+    critical,
+    prompt: `Task for ${id}`,
+    criteria,
+    output: tests.length > 0 ? { result: 'the value' } : null,
+    tests,
+  };
   return { scenario, models };
 };
 
@@ -197,6 +205,48 @@ describe('evaluateGate', () => {
     });
   });
 
+  describe('test lines', () => {
+    it('blocks on a test line at 0% with the skill', () => {
+      const result = evaluateGate(
+        run([
+          scenarioResult(
+            'create-user',
+            ['c1'],
+            [model('m1', [[100, 100], [0, 0], [0, 100]])],
+            false,
+            ['responds 201', 'rejects a bad body'],
+          ),
+        ]),
+        ALL_ON,
+      );
+      expect(result.reasons).toEqual([
+        '**BLOCKED** (universal 0%): `create-user` — criterion: *"[test] responds 201"*',
+      ]);
+      expect(result.blocks).toEqual([{ kind: 'zero', scenario: 'create-user', criterion: 1 }]);
+    });
+
+    it('blocks a critical scenario\'s test regression', () => {
+      const result = evaluateGate(
+        run([
+          scenarioResult(
+            'create-user',
+            [],
+            [model('m1', [[100, 33]]), model('m2', [[100, 100]])],
+            true,
+            ['responds 201'],
+          ),
+        ]),
+        ALL_ON,
+      );
+      expect(result.reasons).toEqual([
+        '**BLOCKED** (regression): `create-user` / m1 — *"[test] responds 201"*: 100% → 33% (-67pp)',
+      ]);
+      expect(result.blocks).toEqual([
+        { kind: 'regression', scenario: 'create-user', criterion: 0, model: 'm1' },
+      ]);
+    });
+  });
+
   describe('errors', () => {
     it('blocks when an output could not be generated or graded', () => {
       const result = evaluateGate(
@@ -206,6 +256,24 @@ describe('evaluateGate', () => {
       expect(result.ready).toBe(false);
       expect(result.reasons).toEqual([
         '**[ERROR]** 3 output(s) could not be generated or graded; their criteria were counted as 0 (see the scenario notes).',
+      ]);
+      expect(result.blocks).toEqual([{ kind: 'error' }]);
+    });
+
+    it('names the code tests in the error reason when any scenario of the run has tests', () => {
+      const result = evaluateGate(
+        run(
+          [
+            scenarioResult('s1', ['c1'], [model('m1', [[0, 100]], 1)]),
+            scenarioResult('s2', [], [model('m1', [[0, 100]], 1)], false, ['responds 201']),
+          ],
+          2,
+        ),
+        { ...ALL_ON, blockOnZero: false },
+      );
+      expect(result.ready).toBe(false);
+      expect(result.reasons).toEqual([
+        '**[ERROR]** 2 error(s): outputs that could not be generated or graded, or code tests that could not run; their lines were counted as 0 (see the scenario notes).',
       ]);
       expect(result.blocks).toEqual([{ kind: 'error' }]);
     });

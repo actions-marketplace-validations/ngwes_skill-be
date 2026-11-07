@@ -29,18 +29,23 @@ describe('loadSuites', () => {
     expect(suite.evalPath).toBe(path.join(config.evals, 'a.json'));
     expect(suite.skillText).toContain('# Skill A');
     expect(suite.skillText).toBe(await readFile(suite.skillPath, 'utf8'));
+    expect([suite.testFiles, suite.codeFiles, suite.packageList]).toEqual([{}, [], null]);
     expect(suite.scenarios).toEqual([
       {
         id: 'double-a-number',
         critical: true,
         prompt: 'Write a TypeScript function that returns twice the value it is given.',
         criteria: ['Calls double() instead of multiplying', 'Returns a number'],
+        output: null,
+        tests: [],
       },
       {
         id: 'double-a-list',
         critical: false,
         prompt: 'Write a TypeScript function that doubles every number in a list.',
         criteria: ['Maps the list with double()'],
+        output: null,
+        tests: [],
       },
     ]);
     expect(warnings).toEqual(['skill "b" has no eval file']);
@@ -124,6 +129,14 @@ describe('loadSuites on malformed projects', () => {
     return loadSuites(await loadConfig(path.join(dir, 'skill-be.yaml')));
   }
 
+  /** `loadWithEval` for a project with a `tests` folder holding the test file of scenario "one". */
+  async function loadWithTests(content: string) {
+    await mkdir(path.join(dir, 'tests', 'x'), { recursive: true });
+    await writeFile(path.join(dir, 'tests', 'x', 'one.test.ts'), '// test\n');
+    await writeFile(path.join(dir, 'skill-be.yaml'), CONFIG_YAML + 'tests: ./tests\n');
+    return loadWithEval(content);
+  }
+
   async function failureFor(content: string): Promise<ConfigError> {
     const error = await loadWithEval(content).then(
       () => undefined,
@@ -149,6 +162,119 @@ describe('loadSuites on malformed projects', () => {
     expect(error.message).toContain('x.json');
     expect(error.message).toContain('"no-criteria"');
     expect(error.message).toContain('criteria');
+  });
+
+  it('parses a judge-only scenario with output null and no tests', async () => {
+    const { suites } = await loadWithEval(JSON.stringify({ skill: 'x', scenarios: [scenario()] }));
+
+    const parsed = suites[0]!.scenarios[0]!;
+    expect(parsed.output).toBeNull();
+    expect(parsed.tests).toEqual([]);
+    expect(parsed.criteria).toEqual(['It is done']);
+  });
+
+  it('parses an output contract in key order', async () => {
+    const output = { result: 'a number', reason: 'why' };
+
+    const { suites } = await loadWithTests(
+      JSON.stringify({ skill: 'x', scenarios: [scenario({ output })] }),
+    );
+
+    const parsed = suites[0]!.scenarios[0]!;
+    expect(parsed.output).toEqual(output);
+    expect(Object.keys(parsed.output!)).toEqual(['result', 'reason']);
+    expect(parsed.tests).toEqual([]);
+  });
+
+  it('accepts a scenario with an output contract and no criteria', async () => {
+    const { suites } = await loadWithTests(
+      JSON.stringify({
+        skill: 'x',
+        scenarios: [scenario({ criteria: undefined, output: { result: 'a number' } })],
+      }),
+    );
+
+    const parsed = suites[0]!.scenarios[0]!;
+    expect(parsed.criteria).toEqual([]);
+    expect(parsed.output).toEqual({ result: 'a number' });
+  });
+
+  it('rejects a scenario with neither criteria nor an output contract', async () => {
+    const error = await failureFor(
+      JSON.stringify({ skill: 'x', scenarios: [scenario({ id: 'x', criteria: undefined })] }),
+    );
+
+    expect(error.message).toContain('x.json');
+    expect(error.message).toContain('scenario "x": needs "criteria", an "output" contract, or both');
+  });
+
+  it('rejects an output contract without result', async () => {
+    const error = await failureFor(
+      JSON.stringify({
+        skill: 'x',
+        scenarios: [scenario({ id: 'x', output: { reason: 'why' } })],
+      }),
+    );
+
+    expect(error.message).toContain('scenario "x": "output" must have a "result" field');
+  });
+
+  it('rejects an output field name that is not an identifier', async () => {
+    const error = await failureFor(
+      JSON.stringify({
+        skill: 'x',
+        scenarios: [scenario({ id: 'x', output: { result: 'a number', 'my field': 'why' } })],
+      }),
+    );
+
+    expect(error.message).toContain('"output.my field" must be a JavaScript identifier');
+  });
+
+  it('rejects an output description that is empty or longer than 200 characters', async () => {
+    for (const description of ['', '   ', 'x'.repeat(201)]) {
+      const error = await failureFor(
+        JSON.stringify({
+          skill: 'x',
+          scenarios: [scenario({ id: 'x', output: { result: description } })],
+        }),
+      );
+
+      expect(error.message).toContain(
+        '"output.result" must be a non-empty string of at most 200 characters',
+      );
+    }
+  });
+
+  it('accepts an output description of exactly 200 characters', async () => {
+    const { suites } = await loadWithTests(
+      JSON.stringify({
+        skill: 'x',
+        scenarios: [scenario({ output: { result: 'x'.repeat(200) } })],
+      }),
+    );
+
+    expect(suites[0]!.scenarios[0]!.output).toEqual({ result: 'x'.repeat(200) });
+  });
+
+  it('rejects an output contract that is not a mapping', async () => {
+    for (const output of ['a number', ['result'], null, 3]) {
+      const error = await failureFor(
+        JSON.stringify({ skill: 'x', scenarios: [scenario({ id: 'x', output })] }),
+      );
+
+      expect(error.message).toContain('scenario "x": "output" must be a mapping');
+    }
+  });
+
+  it('still rejects an empty criteria list', async () => {
+    const error = await failureFor(
+      JSON.stringify({
+        skill: 'x',
+        scenarios: [scenario({ id: 'x', criteria: [], output: { result: 'a number' } })],
+      }),
+    );
+
+    expect(error.message).toContain('"criteria" must be a non-empty list of non-empty strings');
   });
 
   it('rejects a duplicate scenario id, naming the file and the scenario', async () => {
@@ -238,5 +364,155 @@ describe('loadSuites on malformed projects', () => {
 
     expect(error).toBeInstanceOf(ConfigError);
     expect((error as ConfigError).message).toContain('skills');
+  });
+});
+
+describe('loadSuites with code tests', () => {
+  let dir: string;
+
+  beforeEach(async () => {
+    dir = await mkdtemp(path.join(os.tmpdir(), 'skill-be-suite-tests-'));
+    await mkdir(path.join(dir, 'skills', 'x'), { recursive: true });
+    await mkdir(path.join(dir, 'evals'));
+    await writeFile(path.join(dir, 'skills', 'x', 'SKILL.md'), '# X\n');
+  });
+
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  const judged = { id: 'one', critical: false, prompt: 'Do the thing.', criteria: ['It is done'] };
+  const contracted = { id: 'one', critical: false, prompt: 'Do it.', output: { result: 'a' } };
+
+  /** Creates `<dir>/<name>` (and its folders) and returns its path. */
+  async function put(name: string, content = '// test\n'): Promise<string> {
+    const file = path.join(dir, name);
+    await mkdir(path.dirname(file), { recursive: true });
+    await writeFile(file, content);
+    return file;
+  }
+
+  /** The suites of a project with these scenarios and these lines added to the config. */
+  async function load(scenarios: unknown[], yaml = '') {
+    await put('evals/x.json', JSON.stringify({ scenarios }));
+    await put('skill-be.yaml', CONFIG_YAML + yaml);
+    return loadSuites(await loadConfig(path.join(dir, 'skill-be.yaml')));
+  }
+
+  async function failureFor(scenarios: unknown[], yaml = ''): Promise<ConfigError> {
+    const error = await load(scenarios, yaml).then(
+      () => undefined,
+      (e: unknown) => e,
+    );
+    expect(error).toBeInstanceOf(ConfigError);
+    return error as ConfigError;
+  }
+
+  it('rejects output contracts when "tests" is not configured', async () => {
+    const error = await failureFor([contracted]);
+
+    expect(error.message).toBe(
+      'scenario "one" of skill "x" has an "output" contract but "tests" is not set in the config',
+    );
+  });
+
+  it('finds the test files and helpers of a skill with an output contract', async () => {
+    const test = await put('tests/x/one.test.ts');
+    const helper = await put('tests/x/helper.ts');
+    const shared = await put('tests/_shared/common.ts');
+
+    const { suites } = await load([contracted], 'tests: ./tests\n');
+
+    expect(suites[0]!.testFiles).toEqual({ one: test });
+    expect(suites[0]!.codeFiles).toEqual([shared, test, helper].sort());
+  });
+
+  it('has no tests and no package list for a skill without output contracts', async () => {
+    await put('tests/x/helper.ts');
+    await put('tests/_shared/common.ts');
+    await put('test-packages.json', '{}');
+
+    const { suites } = await load([judged], 'tests: ./tests\n');
+
+    expect(suites[0]!.testFiles).toEqual({});
+    expect(suites[0]!.codeFiles).toEqual([]);
+    expect(suites[0]!.packageList).toBeNull();
+  });
+
+  it('rejects a test file for a skill without output contracts', async () => {
+    const file = await put('tests/x/one.test.ts');
+
+    const error = await failureFor([judged], 'tests: ./tests\n');
+
+    expect(error.message).toBe(`${file}: scenario "one" has no "output" contract`);
+  });
+
+  it('prefers the package list of the skill', async () => {
+    await put('tests/x/one.test.ts');
+    await put('default.json', '{}');
+    await put('test-packages.json', '{}');
+    const own = await put('x-packages.json', '{}');
+    const yaml = [
+      'tests: ./tests',
+      'codeTests:',
+      '  packages: ./default.json',
+      '  packagesBySkill:',
+      '    x: ./x-packages.json',
+      '',
+    ].join('\n');
+
+    const { suites } = await load([contracted], yaml);
+
+    expect(suites[0]!.packageList).toBe(own);
+  });
+
+  it('falls back to the package list named in codeTests', async () => {
+    await put('tests/x/one.test.ts');
+    await put('test-packages.json', '{}');
+    const named = await put('default.json', '{}');
+    const yaml = 'tests: ./tests\ncodeTests:\n  packages: ./default.json\n';
+
+    const { suites } = await load([contracted], yaml);
+
+    expect(suites[0]!.packageList).toBe(named);
+  });
+
+  it('falls back to test-packages.json in the config folder', async () => {
+    await put('tests/x/one.test.ts');
+    const found = await put('test-packages.json', '{}');
+
+    const { suites } = await load([contracted], 'tests: ./tests\n');
+
+    expect(suites[0]!.packageList).toBe(found);
+  });
+
+  it('has no package list when none is named and there is no test-packages.json', async () => {
+    await put('tests/x/one.test.ts');
+
+    const { suites } = await load([contracted], 'tests: ./tests\n');
+
+    expect(suites[0]!.packageList).toBeNull();
+  });
+
+  it.each([
+    ['the skill', 'codeTests:\n  packagesBySkill:\n    x: ./gone.json\n'],
+    ['codeTests', 'codeTests:\n  packages: ./gone.json\n'],
+  ])('rejects a package list named for %s that does not exist', async (_name, section) => {
+    await put('tests/x/one.test.ts');
+    await put('test-packages.json', '{}');
+
+    const error = await failureFor([contracted], `tests: ./tests\n${section}`);
+
+    expect(error.message).toBe(
+      `${path.join(dir, 'gone.json')}: the package list does not exist (needed by skill "x")`,
+    );
+  });
+
+  it('does not look for the package list of a skill without output contracts', async () => {
+    const yaml = 'tests: ./tests\ncodeTests:\n  packagesBySkill:\n    x: ./gone.json\n';
+
+    const { suites } = await load([judged], yaml);
+
+    expect(suites[0]!.packageList).toBeNull();
   });
 });

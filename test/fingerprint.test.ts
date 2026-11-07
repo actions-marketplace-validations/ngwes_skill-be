@@ -229,4 +229,88 @@ describe('skillFingerprint', () => {
 
     expect(await skillFingerprint(config, suite)).toBe(before);
   });
+
+  it('a judge-only skill hashes as before', async () => {
+    const { config, suite } = await project(dir);
+
+    expect(await skillFingerprint(config, suite)).toBe(
+      await fingerprint([suite.skillPath, suite.evalPath, config.configPath], config.root),
+    );
+  });
+
+  it('a judge-only skill hashes as before even when tests are configured', async () => {
+    await put(dir, 'tests/a/helper.ts', 'export const x = 1;\n');
+    await put(dir, 'tests/_shared/common.ts', 'export const y = 2;\n');
+    await put(dir, 'test-packages.json', '{}');
+    const { config, suite } = await project(dir, { config: CONFIG_YAML + 'tests: ./tests\n' });
+
+    expect(await skillFingerprint(config, suite)).toBe(
+      await fingerprint([suite.skillPath, suite.evalPath, config.configPath], config.root),
+    );
+  });
+});
+
+const CODE_EVAL_JSON = JSON.stringify({
+  scenarios: [{ id: 's1', prompt: 'Do it.', output: { result: 'a number' } }],
+});
+
+/** A skill with an output contract, its test file, a helper, a shared helper and a package list. */
+async function codeProject(root: string) {
+  await put(root, 'tests/a/s1.test.ts', 'test one\n');
+  await put(root, 'tests/a/helper.ts', 'helper one\n');
+  await put(root, 'tests/_shared/common.ts', 'common one\n');
+  await put(root, 'test-packages.json', '{"zod": "3.23.8"}\n');
+  return project(root, { evals: CODE_EVAL_JSON, config: CONFIG_YAML + 'tests: ./tests\n' });
+}
+
+describe('skillFingerprint of a skill with code tests', () => {
+  it('hashes the code files and the package list after the three files', async () => {
+    const { config, suite } = await codeProject(dir);
+
+    expect(suite.codeFiles).toHaveLength(3);
+    expect(await skillFingerprint(config, suite)).toBe(
+      await fingerprint(
+        [
+          suite.skillPath,
+          suite.evalPath,
+          config.configPath,
+          ...suite.codeFiles,
+          suite.packageList!,
+        ],
+        config.root,
+      ),
+    );
+  });
+
+  it('is the same for the same project in another directory', async () => {
+    const other = await tempDir();
+    const here = await codeProject(dir);
+    const there = await codeProject(other);
+
+    expect(await skillFingerprint(there.config, there.suite)).toBe(
+      await skillFingerprint(here.config, here.suite),
+    );
+  });
+
+  it.each([
+    ['a test file', 'tests/a/s1.test.ts'],
+    ['a helper', 'tests/a/helper.ts'],
+    ['a shared helper', 'tests/_shared/common.ts'],
+    ['the package list', 'test-packages.json'],
+  ])('a change to %s changes the fingerprint', async (_name, file) => {
+    const { config, suite } = await codeProject(dir);
+    const before = await skillFingerprint(config, suite);
+
+    await put(dir, file, 'changed\n');
+
+    expect(await skillFingerprint(config, suite)).not.toBe(before);
+  });
+
+  it('differs from the hash of the three files alone', async () => {
+    const { config, suite } = await codeProject(dir);
+
+    expect(await skillFingerprint(config, suite)).not.toBe(
+      await fingerprint([suite.skillPath, suite.evalPath, config.configPath], config.root),
+    );
+  });
 });

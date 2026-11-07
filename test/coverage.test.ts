@@ -3,7 +3,12 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { coverage, validateCoverage, type CoverageDeps } from '../src/checks/coverage.js';
+import {
+  apiWords,
+  coverage,
+  validateCoverage,
+  type CoverageDeps,
+} from '../src/checks/coverage.js';
 import { ConfigError, type CoverageConfig, type SkillSuite } from '../src/types.js';
 
 const FIXTURES = fileURLToPath(new URL('./fixtures/typecheck/', import.meta.url));
@@ -46,7 +51,16 @@ async function skill(
 ): Promise<SkillSuite> {
   const evalPath = path.join(dir, `${name}.json`);
   await writeFile(evalPath, evalText);
-  return { name, skillPath: path.join(dir, name, 'SKILL.md'), skillText, evalPath, scenarios: [] };
+  return {
+    name,
+    skillPath: path.join(dir, name, 'SKILL.md'),
+    skillText,
+    evalPath,
+    scenarios: [],
+    testFiles: {},
+    codeFiles: [],
+    packageList: null,
+  };
 }
 
 async function missingIn(
@@ -285,7 +299,16 @@ describe.runIf(Boolean(SKILLS_REPO && MINI_FP_ENTRY))('the mini-fp-skills covera
       const skillPath = path.join(REPO, 'skills', name, 'SKILL.md');
       const skillText = await readFile(skillPath, 'utf8');
       const evalPath = path.join(REPO, 'evals', `${name}.json`);
-      suites.push({ name, skillPath, skillText, evalPath, scenarios: [] });
+      suites.push({
+        name,
+        skillPath,
+        skillText,
+        evalPath,
+        scenarios: [],
+        testFiles: {},
+        codeFiles: [],
+        packageList: null,
+      });
     }
     const cfg: CoverageConfig = { preset: 'typescript', entry: ENTRY, ignore: [], blocking: false };
 
@@ -331,5 +354,50 @@ describe('validateCoverage', () => {
 
     expect(error).toBeInstanceOf(ConfigError);
     expect((error as Error).message).toContain(message);
+  });
+});
+
+describe('apiWords', () => {
+  it('lists the words the typescript preset matches, a shared member name once', async () => {
+    const words = await apiWords(PRESET, FIXTURES);
+
+    // Box.value and Option.value are both matched by the word `value`.
+    expect(words.slice().sort()).toEqual([
+      'Box',
+      'Mapper',
+      'Option',
+      'box',
+      'get',
+      'map',
+      'of',
+      'size',
+      'value',
+    ]);
+  });
+
+  it('lists the names a command prints, each once', async () => {
+    const lister = path.join(FIXTURES, 'list-api.mjs');
+    const names = ['fetchUser', 'Account.close', 'fetchUser'];
+    const command = [`"${process.execPath}"`, `"${lister}"`, ...names].join(' ');
+
+    const words = await apiWords({ ...PRESET, command }, FIXTURES);
+
+    expect(words).toEqual(['fetchUser', 'Account.close']);
+  });
+
+  it('keeps the names the coverage ignore list leaves out', async () => {
+    const words = await apiWords({ ...PRESET, ignore: ['Box', 'box'] }, FIXTURES);
+
+    expect(words).toContain('Box');
+    expect(words).toContain('box');
+  });
+
+  it('fails like coverage when the entry does not exist', async () => {
+    const error = await apiWords({ ...PRESET, entry: './lib/nowhere.ts' }, FIXTURES).catch(
+      (caught: unknown) => caught,
+    );
+
+    expect(error).toBeInstanceOf(ConfigError);
+    expect((error as Error).message).toContain('nowhere.ts');
   });
 });

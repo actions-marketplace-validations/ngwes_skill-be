@@ -3,9 +3,11 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { AdapterError, type Adapter, type AdapterContext } from '../src/adapters/index.js';
+import { armPrompts } from '../src/code-tests/contract.js';
+import type { CodeTestResult } from '../src/code-tests/runtime.js';
 import { buildGraderPrompt } from '../src/grader.js';
 import type { RunSummary, ScenarioSummary, SkillSummary } from '../src/report.js';
-import { parseClassification, triage } from '../src/triage.js';
+import { parseClassification, TEST_TRIAGE_CATEGORIES, triage } from '../src/triage.js';
 import {
   ConfigError,
   type AdapterSettings,
@@ -49,6 +51,14 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
     gate: { regressionOnCritical: true, blockOnZero: true, blockOnErrors: true },
     checks: { typecheck: false, coverage: false },
     triage: { model: TRIAGER },
+    codeTests: {
+      tests: null,
+      packages: null,
+      packagesBySkill: {},
+      testTimeoutSeconds: 10,
+      answerTimeoutSeconds: 60,
+      allow: [],
+    },
     ...overrides,
   };
 }
@@ -58,6 +68,8 @@ const scenario = (id: string, criteria = ['c1', 'c2']): Scenario => ({
   critical: true,
   prompt: `Task for ${id}`,
   criteria,
+  output: null,
+  tests: [],
 });
 
 function makeSuite(name = 'demo', scenarios: Scenario[] = [scenario('s1')]): SkillSuite {
@@ -67,6 +79,9 @@ function makeSuite(name = 'demo', scenarios: Scenario[] = [scenario('s1')]): Ski
     skillText: `the ${name} skill`,
     evalPath: path.join(root, 'evals', `${name}.json`),
     scenarios,
+    testFiles: {},
+    codeFiles: [],
+    packageList: null,
   };
 }
 
@@ -80,6 +95,7 @@ function summaryScenario(
     critical: s.critical,
     prompt: s.prompt,
     criteria: [...s.criteria],
+    tests: [...s.tests],
     models: Object.entries(models).map(([model, scores]) => ({
       model,
       criteria: scores.map(([baselinePct, withSkillPct]) => ({ baselinePct, withSkillPct })),
@@ -633,6 +649,233 @@ describe('parseClassification', () => {
     ['a reason before the classification', 'REASON: noise\nCLASSIFICATION: skill gap'],
   ])('returns null for %s', (_, answer) => {
     expect(parseClassification(answer)).toBeNull();
+  });
+
+  it('reads "test error" only from the categories of a test line', () => {
+    const testError = 'CLASSIFICATION: Test Error\nREASON: the test wants a string';
+    expect(parseClassification(testError, TEST_TRIAGE_CATEGORIES)).toEqual({
+      proposed: 'test error',
+      reason: 'the test wants a string',
+    });
+    expect(parseClassification(testError)).toBeNull();
+    expect(
+      parseClassification('CLASSIFICATION: grader error\nREASON: no', TEST_TRIAGE_CATEGORIES),
+    ).toBeNull();
+  });
+});
+
+describe('triage of code tests', () => {
+  const TEST = 'adds two numbers';
+  const TEST_SOURCE = "test('adds two numbers', ({ result }) => check(result)); // test source";
+  const FAILURE = 'result(1, 2) returned 2, expected 3';
+  const TEST_ERROR = 'CLASSIFICATION: test error\nREASON: the test checks a name the task lacks';
+
+  /** The scenario as the eval file has it: an output contract, its tests not listed yet. */
+  const tested = (criteria: string[] = []): Scenario => ({
+    ...scenario('s1', criteria),
+    output: { result: 'a function (a, b) => number that returns the sum' },
+  });
+
+  async function testedSuite(criteria: string[] = []): Promise<SkillSuite> {
+    const testFile = path.join(root, 'skill-tests', 'demo', 's1.test.ts');
+    await mkdir(path.dirname(testFile), { recursive: true });
+    await writeFile(testFile, TEST_SOURCE);
+    return { ...makeSuite('demo', [tested(criteria)]), testFiles: { s1: testFile } };
+  }
+
+  /** A run where the test line of `s1` (after its criteria) caused a zero block. */
+  async function failingTest(tests = [TEST]): Promise<void> {
+    const s1 = { ...tested(), tests };
+    await writeSummary({
+      skills: [
+        skillSummary('demo', [summaryScenario(s1, { m1: tests.map(() => [0, 0]) })], [
+          { kind: 'zero', scenario: 's1', criterion: 0 },
+        ]),
+      ],
+    });
+  }
+
+  const failed = (message: string): CodeTestResult => ({
+    outcomes: [{ name: TEST, pass: false, message }],
+    infraError: null,
+  });
+
+  /** A fake preparation that lists `TEST` in every scenario with a contract, recording calls. */
+  function codeTests(result: (output: string) => CodeTestResult = () => failed(FAILURE)) {
+    const prepared: SkillSuite[][] = [];
+    const runs: Array<[string, string, string]> = [];
+    const prepareCodeTests = async (suites: SkillSuite[]) => {
+      prepared.push(suites);
+      return {
+        suites: suites.map((suite) => ({
+          ...suite,
+          scenarios: suite.scenarios.map((s) => (s.output === null ? s : { ...s, tests: [TEST] })),
+        })),
+        run: async (skill: string, id: string, output: string) => {
+          runs.push([skill, id, output]);
+          return result(output);
+        },
+      };
+    };
+    return { prepareCodeTests, prepared, runs };
+  }
+
+  it('triages a failing test with fresh samples run against the tests', async () => {
+    await failingTest();
+    const suite = await testedSuite();
+    const { deps, calls } = fakes({ triager: async () => TEST_ERROR });
+    const tests = codeTests((output) => {
+      if (output === 'code sample 2') {
+        return { outcomes: [{ name: TEST, pass: true, message: '' }], infraError: null };
+      }
+      if (output === 'code sample 3') {
+        return { outcomes: [], infraError: 'the answer timed out after 60s' };
+      }
+      return failed(FAILURE);
+    });
+
+    const result = await triage(makeConfig(), [suite], {
+      samples: 3,
+      deps: { ...deps, prepareCodeTests: tests.prepareCodeTests },
+    });
+
+    expect(tests.prepared).toEqual([[suite]]);
+    expect(tests.runs.map(([, , output]) => output).sort()).toEqual([
+      'code sample 1',
+      'code sample 2',
+      'code sample 3',
+    ]);
+    expect(tests.runs.every(([skill, id]) => skill === 'demo' && id === 's1')).toBe(true);
+    expect(calls.grader).toEqual([]);
+    expect(result.items).toEqual([
+      {
+        skill: 'demo',
+        scenario: 's1',
+        criterion: `[test] ${TEST}`,
+        model: 'm1',
+        proposed: 'test error',
+        reason: 'the test checks a name the task lacks',
+      },
+    ]);
+    const report = await readFile(result.reportPath, 'utf8');
+    expect(report).toContain('3 fresh with-skill sample(s) per failure, each run against the code');
+    expect(report).toContain(`| [test] ${TEST} | test error |`);
+    expect(report).toContain(`Criterion 1: *"[test] ${TEST}"*`);
+    expect(report).toContain(FAILURE);
+    expect(report).toContain('the answer timed out after 60s');
+    expect(report).toContain('### Sample 1 — test: FAIL');
+    expect(report).toContain('### Sample 2 — test: PASS');
+    expect(report).toContain('### Sample 3 — test: no verdict');
+  });
+
+  it('the sample prompt carries the contract and no test source', async () => {
+    await failingTest();
+    const suite = await testedSuite();
+    const { deps, calls } = fakes();
+
+    await triage(makeConfig(), [suite], {
+      deps: { ...deps, prepareCodeTests: codeTests().prepareCodeTests },
+    });
+
+    const expected = armPrompts(makeConfig().withSkillTemplate, suite.skillText, tested());
+    expect(calls.model).toEqual([expected.withSkill, expected.withSkill]);
+    expect(calls.model[0]).toContain('Answer format:');
+    expect(calls.model[0]).not.toContain(TEST_SOURCE);
+    expect(calls.model[0]).not.toContain(TEST);
+  });
+
+  it('the classification prompt carries the test source and the failure message', async () => {
+    await failingTest();
+    const { deps, calls } = fakes();
+
+    await triage(makeConfig(), [await testedSuite()], {
+      deps: { ...deps, prepareCodeTests: codeTests().prepareCodeTests },
+    });
+
+    const prompt = calls.triager[0] as string;
+    expect(prompt).toContain(`"${TEST}"`);
+    expect(prompt).toContain(TEST_SOURCE);
+    expect(prompt).toContain(FAILURE);
+    expect(prompt).toContain('code sample 1');
+    expect(prompt).toContain('code sample 2');
+  });
+
+  it('offers "test error" instead of "grader error" for a test line', async () => {
+    await failingTest();
+    const suite = await testedSuite();
+    const { deps, calls } = fakes();
+
+    const result = await triage(makeConfig(), [suite], {
+      deps: { ...deps, prepareCodeTests: codeTests().prepareCodeTests },
+    });
+
+    const prompt = calls.triager[0] as string;
+    expect(prompt).toContain(
+      '- test error: the test, not the answer, is wrong (too strict, or it checks something the ' +
+        'task did not ask for);',
+    );
+    expect(prompt).not.toContain('grader error');
+    expect(prompt).toContain(
+      'CLASSIFICATION: <one of: skill gap, eval too strict, test error, model choice>',
+    );
+    // The fake triage model answers "grader error", which a test line does not offer.
+    expect(result.items[0]).toMatchObject({
+      proposed: 'unclassified',
+      reason: 'the classification could not be parsed',
+      rawAnswer: CLASSIFIED,
+    });
+  });
+
+  it('notes a test that no longer exists as not triaged', async () => {
+    await failingTest(['an old test']);
+    const { deps, calls } = fakes();
+
+    const result = await triage(makeConfig(), [await testedSuite()], {
+      deps: { ...deps, prepareCodeTests: codeTests().prepareCodeTests },
+    });
+
+    expect(result.items).toEqual([]);
+    expect(calls.model).toEqual([]);
+    expect(await readFile(result.reportPath, 'utf8')).toContain(
+      '- `demo` / `s1` / m1: the code tests no longer have the test "an old test"; not triaged.',
+    );
+  });
+
+  it('prepares no code tests when only a criterion failed, and grades it as before', async () => {
+    const s1 = { ...tested(['c1']), tests: [TEST] };
+    await writeSummary({
+      skills: [
+        skillSummary('demo', [summaryScenario(s1, { m1: [[0, 0], [100, 100]] })], [
+          { kind: 'zero', scenario: 's1', criterion: 0 },
+        ]),
+      ],
+    });
+    const suite = await testedSuite(['c1']);
+    const { deps, calls } = fakes({ grader: async () => graderReply([false]) });
+    const tests = codeTests();
+
+    const result = await triage(makeConfig(), [suite], {
+      deps: { ...deps, prepareCodeTests: tests.prepareCodeTests },
+    });
+
+    expect(tests.prepared).toEqual([]);
+    expect(result.items).toMatchObject([
+      { criterion: 'c1', proposed: 'grader error', reason: 'the code calls map.' },
+    ]);
+    expect(calls.grader).toHaveLength(2);
+    // The samples carry the contract, as the with-skill arm of the run did.
+    const expected = armPrompts(makeConfig().withSkillTemplate, suite.skillText, tested(['c1']));
+    expect(calls.model).toEqual([expected.withSkill, expected.withSkill]);
+  });
+
+  it('throws before any call when a test fails and no code tests can be prepared', async () => {
+    await failingTest();
+    const { deps, calls } = fakes();
+
+    await expect(triage(makeConfig(), [await testedSuite()], { deps })).rejects.toThrow(
+      /code tests/,
+    );
+    expect(calls.model).toEqual([]);
   });
 });
 

@@ -1,0 +1,31 @@
+skills: ./skills
+evals: ./evals
+tests: ./skill-tests
+
+# The model under test and the judge. For apiKeyEnv, see "Credentials" in skill-be's README.
+model:
+  adapter: claude-cli
+  id: claude-sonnet-5-5
+  apiKeyEnv: ANTHROPIC_API_KEY
+grader:
+  adapter: claude-cli
+  id: claude-haiku-5-5
+  apiKeyEnv: ANTHROPIC_API_KEY
+
+# 1 scenario x 3 reps x 2 arms = 6 generations. The judge grades the criterion of each; the tests
+# run against each.
+reps: 3
+gradings: 1
+
+withSkillTemplate: |-
+  Follow these conventions when writing the code.
+
+  --- CONVENTIONS ---
+  {{skill}}
+  --- END CONVENTIONS ---
+
+  Task: {{task}}
+
+# The skill has no code examples to typecheck.
+checks:
+  typecheck: false

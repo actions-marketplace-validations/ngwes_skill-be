@@ -23,7 +23,7 @@ A skill is documentation written for a model: it teaches the model how to use yo
 For each skill, skill-be answers one question: does giving this skill to the model make it write the code the skill teaches, without making anything worse?
 
 1. **Two arms.** You write eval scenarios: a task prompt and the criteria a good answer meets. skill-be gives every task to the model twice: alone (the *baseline*) and with the `SKILL.md` text put in front of it (*with skill*). Each arm is repeated `reps` times.
-2. **Grading.** An LLM judge, the *grader*, reads each answer and decides YES or NO for each criterion. A criterion's score in an arm is the share of reps graded YES.
+2. **Grading.** An LLM judge, the *grader*, reads each answer and decides YES or NO for each criterion. A criterion's score in an arm is the share of reps graded YES. Instead of a judge, or besides it, a scenario can run tests against the model's code ([Code tests](#code-tests)).
 3. **The gate.** Rules turn the scores into READY or NOT READY. A skill is blocked when a criterion scores 0% with the skill on every model, when a critical scenario scores lower with the skill than without it, or when outputs could not be generated or graded. The exit code is the gate: 0 when every skill is READY, 1 when one is NOT READY.
 4. **Checks, without a model.** The TypeScript examples in each `SKILL.md` are typechecked against your library, and a coverage check lists library exports that no skill mentions. A failing blocking check also makes the exit code 1.
 
@@ -41,7 +41,7 @@ The usual workflow:
 4. Run `skill-be verify` in CI. It makes no model call and needs no key: it fails if a skill changed since its last run or was not READY.
 
 <!-- docs-site:skip-start -->
-Contents: [Install](#install) · [Example: test a skill end to end](#example-test-a-skill-end-to-end) · [Example: test a skill without code](#example-test-a-skill-without-code) · [Configuration](#configuration) · [Adapters](#adapters) · [Commands](#commands) · [The release gate](#the-release-gate) · [Grading](#grading) · [Workflows](#workflows) · [Result file](#result-file) · [Checks](#checks) · [Triage](#triage) · [Writing evals](#writing-evals) · [Related tools](#related-tools) · [License](#license)
+Contents: [Install](#install) · [Example: test a skill end to end](#example-test-a-skill-end-to-end) · [Example: test a skill without code](#example-test-a-skill-without-code) · [Configuration](#configuration) · [Adapters](#adapters) · [Commands](#commands) · [The release gate](#the-release-gate) · [Grading](#grading) · [Workflows](#workflows) · [Result file](#result-file) · [Checks](#checks) · [Triage](#triage) · [Writing evals](#writing-evals) · [Code tests](#code-tests) · [Related tools](#related-tools) · [License](#license)
 <!-- docs-site:skip-end -->
 
 ## Install
@@ -53,7 +53,7 @@ npm install --save-dev @ngwes/skill-be
 npx skill-be --help
 ```
 
-`typescript` (5 or 6) is an optional peer dependency. Install it (`npm install --save-dev typescript`) to use the TypeScript typecheck and coverage presets. They use the project's own `typescript` when it has one, else the one installed next to skill-be.
+`typescript` (5 or 6) is an optional peer dependency. Install it (`npm install --save-dev typescript`) to use the TypeScript typecheck and coverage presets, and [code tests](#code-tests). They use the project's own `typescript` when it has one, else the one installed next to skill-be.
 
 `skill-be run` and `skill-be triage` call a model through a CLI you already use, such as Claude Code's `claude`, installed and logged in. `skill-be check` and `skill-be verify` call no model.
 
@@ -795,7 +795,7 @@ The rest is the same as in the first example: [`skill-be run`](#run-the-benchmar
 
 ## Configuration
 
-`skill-be.yaml` at the project root; use `--config <path>` for another file. Relative paths inside it resolve against the config file's directory. An unknown key is an error (exit code 2), at the top level and inside `gate`, `checks`, `checks.typecheck`, `checks.coverage` and `triage`, so a typo such as `bloking: true` cannot pass unnoticed. The adapter entries (`model`, `grader`, `triage.model`) are the exception: they accept any key, since their settings belong to the adapter.
+`skill-be.yaml` at the project root; use `--config <path>` for another file. Relative paths inside it resolve against the config file's directory. An unknown key is an error (exit code 2), at the top level and inside `gate`, `checks`, `checks.typecheck`, `checks.coverage`, `triage` and `codeTests`, so a typo such as `bloking: true` cannot pass unnoticed. The adapter entries (`model`, `grader`, `triage.model`) are the exception: they accept any key, since their settings belong to the adapter.
 
 This is the minimum. A skill is a folder under `skills` with a `SKILL.md`; its eval file is `<evals>/<skill>.json`.
 
@@ -830,6 +830,12 @@ grader:
 | `checks.typecheck` | `{ preset: typescript, blocking: true }` when `typescript` is installed, else off | Typecheck the code examples (see [Checks](#checks)); `false` turns it off |
 | `checks.coverage` | off | Report library exports that no skill mentions; `blocking` defaults to `false` |
 | `triage.model` | the failing output's own model under test | An adapter entry that classifies failures (see [Triage](#triage)) |
+| `tests` | none | The folder of the code tests, one subfolder per skill; required for a skill whose scenarios have an `output` (see [Writing the tests](#writing-the-tests)) |
+| `codeTests.packages` | `test-packages.json` next to the config, when it exists | The default package list the code tests install (see [Libraries the code may import](#libraries-the-code-may-import)) |
+| `codeTests.packagesBySkill` | `{}` | A map from a skill name to its own package list, instead of the default |
+| `codeTests.testTimeoutSeconds` | `10` | Per test; a test that runs longer fails. At most `2147483` |
+| `codeTests.answerTimeoutSeconds` | `60` | Per answer, for all its tests; the process is killed after it and the unfinished tests fail. At most `2147483` |
+| `codeTests.allow` | `[]` | Words the [hint-word check](#the-hint-word-check) does not report |
 
 The default `withSkillTemplate` (`{{skill}}` is the full text of `SKILL.md`, `{{task}}` is the scenario prompt):
 
@@ -1062,15 +1068,16 @@ Commands:
                      under the results directory, updates the result file, then runs the checks.
   verify             Without a model call: checks that the result file matches the current
                      skills, evals and config and records every skill READY, then runs the checks.
-  check              Runs the typecheck and coverage checks.
-  triage [skill...]  Proposes a classification for each failing criterion of the latest run.
-                     Never blocks.
+  check              Runs the typecheck and coverage checks, and parses the code tests.
+  triage [skill...]  Proposes a classification for each failing criterion or code test of the
+                     latest run. Never blocks.
 
 Options:
   --config <path>    The config file (default: ./skill-be.yaml)
   --reps <n>         run: generations per arm per scenario, instead of the config's
   --concurrency <n>  run: model calls in flight at once, instead of the config's
   --html             run: also writes results.html beside summary.json, with every answer
+  --keep-deps        run, triage: keeps the installed test packages in .skill-be/deps for the next run
   --below <pct>      triage: also triage criteria that scored under pct% with the skill
   --samples <n>      triage: fresh with-skill samples per failing criterion (default: 2)
   -h, --help         Shows this help
@@ -1080,6 +1087,8 @@ blocks, 2 for a usage or config error.
 ```
 
 A skill folder with no eval file is skipped with a warning (`warning: skill "x" has no eval file`) by every command. Naming a skill that has no `SKILL.md` is a config error. Options take `--name value` or `--name=value`.
+
+`run` and `triage` install the package lists of code tests under `.skill-be/deps` and delete them when they end, unless `--keep-deps` is given ([Libraries the code may import](#libraries-the-code-may-import)). `verify` installs nothing and takes no `--keep-deps`. `check` parses the test files, reads the package lists, warns about hint words in the output contracts, and installs and runs nothing.
 
 `--reps` and `--concurrency` apply to that run only. The result file does not record `reps` or `gradings`, so run the benchmark you commit with the config's values.
 
@@ -1091,7 +1100,7 @@ A run makes, per skill, `scenarios x models x reps x 2` generations (two arms), 
 |---|---|
 | `0` | Success: every skill READY and every blocking check passing (`run`, `verify`, `check`), `triage` finished, or `--help` |
 | `1` | A skill is NOT READY, `verify` found a problem with the result file, or a blocking check failed. An unexpected crash also exits 1, with its stack on stderr |
-| `2` | A usage or config error: unknown command or option, a missing or invalid config or eval file, an unknown skill name, no skill with both a `SKILL.md` and an eval file, a broken result file, a misconfigured check or adapter (an `apiKeyEnv` variable unset in CI, missing `provider`, bad `thinking`, unknown adapter), a model or grader CLI that cannot start (not installed, a wrong `bin` or `run`), or `triage` with no earlier run |
+| `2` | A usage or config error: unknown command or option, a missing or invalid config or eval file, an unknown skill name, no skill with both a `SKILL.md` and an eval file, a broken result file, a misconfigured check or adapter (an `apiKeyEnv` variable unset in CI, missing `provider`, bad `thinking`, unknown adapter), a model or grader CLI that cannot start (not installed, a wrong `bin` or `run`), code tests that cannot be set up (a test file that matches no scenario, a missing package list, an install that fails, a test file that throws when it loads), or `triage` with no earlier run |
 | `130` | Interrupted by SIGINT (Ctrl+C) |
 | `143` | Terminated by SIGTERM |
 
@@ -1109,6 +1118,7 @@ Everything lands under `results`, in a directory named for the start time of the
   money/<scenario>/<model>/
     rep-1-baseline.md                   a generated output
     rep-1-baseline.grading-1.md         a raw grader answer for that output
+    rep-1-baseline.tests.json           with code tests: the result of each test on that output
     rep-1-with-skill.md
     rep-1-with-skill.grading-1.md
 ```
@@ -1121,7 +1131,7 @@ Add `.skill-be/` to your `.gitignore`: the results directory is for inspection, 
 
 - a banner with the verdict of the run, how many skills block, the date, the models and the grader;
 - an overview table: each skill's verdict, errors, duration and why it blocks, linked to its section;
-- a section per skill, open when the skill blocks: the gate reasons, then each scenario with its prompt, its scores per model and the grader's notes, and, folded, every rep's answer from both arms with the grader replies.
+- a section per skill, open when the skill blocks: the gate reasons, then each scenario with its prompt, its scores per model and the grader's notes, and, folded, every rep's answer from both arms with the grader replies and, for code tests, the result and failure message of each test.
 
 The page is one file that loads nothing and runs no script, so it opens offline and still works when you move it or download it from CI ([Verify in CI](#verify-in-ci)). Like `summary.json`, it is rewritten after every skill.
 
@@ -1133,9 +1143,11 @@ A skill is NOT READY when any enabled rule holds:
 
 1. **Zero** (`gate.blockOnZero`): a criterion scores 0% with the skill on every model under test.
 2. **Critical regression** (`gate.regressionOnCritical`): in a scenario marked `"critical": true`, a criterion scores lower with the skill than in the baseline, on any model.
-3. **Errors** (`gate.blockOnErrors`): any output could not be generated or graded.
+3. **Errors** (`gate.blockOnErrors`): any output could not be generated or graded, or its code tests could not run.
 
 Otherwise it is READY. A criterion's score for an arm is the share of reps whose verdict is YES, rounded to a whole percent. A generation that fails is not retried; it is an error, and its criteria count as 0.
+
+A code test is a criterion for rules 1 and 2, named `[test] <name>` in the reasons, and an answer whose tests could not run is an error for rule 3 ([Scores and the gate](#scores-and-the-gate)).
 
 The `Release Gate` section of each report uses fixed strings, so scripts can grep them:
 
@@ -1155,6 +1167,12 @@ or, for a blocked skill:
 - **BLOCKED** (regression): `split-the-bill` / claude-sonnet-5-5 — *"The shares it returns always add up exactly to the total"*: 100% → 33% (-67pp)
 
 **NOT READY**
+```
+
+In a run with [code tests](#code-tests), the error line names them too:
+
+```
+- **[ERROR]** 2 error(s): outputs that could not be generated or graded, or code tests that could not run; their lines were counted as 0 (see the scenario notes).
 ```
 
 Per-output problems appear as `[ERROR]` and `[NOTE]` lines under the scenario tables.
@@ -1201,13 +1219,13 @@ The example shows the steps: [Commit the result](#commit-the-result), then [Veri
 
 `skill-be.result.json` is meant to be committed. It records the skill-be version and, per skill, the date of its last run, its verdict, the blocking reasons, the models and the grader, and a fingerprint ([sample](#commit-the-result)).
 
-The fingerprint is a SHA-256 over the skill's `SKILL.md`, its eval file and the config file. Line endings are normalized to LF first, so a Windows run matches a Linux `verify`. The skill-be version is recorded but is not part of the match. Neither the library nor the prelude files are part of it; `verify` re-runs the typecheck itself. Since it covers the config file, any edit to `skill-be.yaml` (a comment included) makes every skill stale. `skill-be run <skill>` re-runs one skill and replaces only its entry.
+The fingerprint is a SHA-256 over the skill's `SKILL.md`, its eval file and the config file. For a skill with code tests it also covers the skill's files under the tests folder, the `_shared` folder there, and the package list the skill uses (the list file, not the packages it names). Line endings are normalized to LF first, so a Windows run matches a Linux `verify`. The skill-be version is recorded but is not part of the match. Neither the library nor the prelude files are part of it; `verify` re-runs the typecheck itself. Since it covers the config file, any edit to `skill-be.yaml` (a comment included) makes every skill stale. `skill-be run <skill>` re-runs one skill and replaces only its entry.
 
 `verify` fails when:
 
 - the result file is missing;
 - a skill that has an eval file has no entry in it (a skill folder without an eval file is skipped with a warning);
-- a skill's `SKILL.md`, its eval file or the config changed since its entry was written;
+- a skill's `SKILL.md`, its eval file or the config changed since its entry was written, or, for a skill with code tests, its tests or its package list;
 - an entry records a NOT READY verdict;
 - a blocking check fails. By default that is the typecheck, so install `typescript` and your library where `verify` runs (`npm ci` with both as dev dependencies). Without `typescript` the default typecheck is off, and `verify` prints `typecheck: off`.
 
@@ -1281,7 +1299,7 @@ coverage: 1 API name(s) not mentioned in any SKILL.md or eval file, not blocking
 
 `skill-be triage [skill...]` looks closer at the failures of the latest run: the newest directory under `results` with a `summary.json`. It never blocks (exit code 0), but it needs a run to read, so run the benchmark first.
 
-A failing criterion is one that caused a block in that run: a zero block (triaged on every model under test) or a regression block (on its model). With `--below <pct>` it also takes criteria that scored under that percentage with the skill. The `[ERROR]` block names no criterion and is listed as not triaged.
+A failing criterion is one that caused a block in that run: a zero block (triaged on every model under test) or a regression block (on its model). A [code test](#triage-of-code-tests) that caused one is triaged the same way. With `--below <pct>` it also takes criteria that scored under that percentage with the skill. The `[ERROR]` block names no criterion and is listed as not triaged.
 
 For each failure it generates fresh with-skill samples (`--samples`, default 2), grades them asking the grader for its reasons, and asks a model to classify the failure. `triage.model` picks that model; by default it is the failing output's own model under test, not the grader, since grader errors are one of the categories.
 
@@ -1301,6 +1319,8 @@ Each failure gets one proposed classification for a human to confirm:
 | grader error | The answer satisfies the criterion and the grader still says NO |
 | model choice | The skill is clear and the model picks another reasonable approach |
 
+For a failing code test, `test error` replaces `grader error`: the test, not the answer, is wrong ([Triage of code tests](#triage-of-code-tests)).
+
 A failure whose samples could not be generated, or whose classification could not be read, is `unclassified`. The code, the grader's reasons and the proposals are saved side by side in `triage-<timestamp>.md` inside that run's directory, and the terminal lists the proposals:
 
 ```
@@ -1319,7 +1339,8 @@ An eval file holds the scenarios of one skill. The file name decides which skill
 | `id` | A unique, non-empty string per scenario |
 | `critical` | Optional, default `false`. A regression on a critical scenario blocks the skill |
 | `prompt` | The task given to the model |
-| `criteria` | A non-empty list of strings, graded together but each judged separately |
+| `criteria` | A non-empty list of strings, graded together but each judged separately. Optional when the scenario has an `output` |
+| `output` | Optional. The names the model's code must export, to run [code tests](#code-tests) against it. A scenario needs `criteria`, an `output`, or both |
 
 Good scenarios and criteria are most of the value:
 
@@ -1331,11 +1352,424 @@ Good scenarios and criteria are most of the value:
 
 When a criterion fails with the skill, read the grader's answers (`*.grading-<n>.md` next to the output) before changing the skill, or run `skill-be triage`. One model with one rep is noise: keep several reps, and look at the delta between the arms, not only the score with the skill.
 
+## Code tests
+
+A judge reads the model's code and says whether it does what a criterion asks. A code test runs it. For a skill that teaches a model to write code, running the code is the stronger evidence: the handler answers 409 for a taken email, or it does not. A scenario can have judge criteria, code tests, or both, and one skill can mix the three kinds of scenario.
+
+How it works:
+
+1. **A contract.** The scenario gets an `output` in its eval file: the names the model's code must export, each with a short description. skill-be appends a fixed paragraph that asks for that format to the prompt of both arms.
+2. **The answer.** The model writes the code as before, alone and with the skill. skill-be takes the code block from the reply and loads it as a module.
+3. **The tests.** Your tests, ordinary TypeScript files in a tests folder, run against that module in a separate process. Each test is one scored line, `[test] <name>`, with a baseline and a with-skill pass rate over the reps. It goes through the same rules as a judge criterion in [the release gate](#the-release-gate).
+
+The tests never reach the model: nothing from the tests folder goes into a prompt that produces an answer to score, in a benchmark run or in triage's fresh samples.
+
+Choose by what you want to know. Use criteria for what only a reader can see: which API the code uses, a naming rule, "never logs the password". Use tests for what the code does when it is called: the value it returns, the status it answers, the calls it makes. A criterion can pass code that does not work; a test cannot. A test can fail correct code that reaches the right result another way, so assert what the task asks for and nothing more. Put both on one scenario when both matter: the judge and the tests get the same answer. A scenario with tests and no criteria makes no grader call.
+
+### Example: a signup handler
+
+This example tests `signup`, a skill that teaches a service's conventions for its signup function: which status each case answers with, and that the function takes what it needs as parameters. Like the [first example](#example-test-a-skill-end-to-end), every file is shown in full. skill-be's own tests (`test/fixtures/signup`) check that they match this section, that `skill-be check` passes, and that the tests tell an answer that follows the skill from one that does not.
+
+```
+signup/
+  skill-be.yaml
+  skills/
+    signup/
+      SKILL.md
+  evals/
+    signup.json
+  skill-tests/
+    signup/
+      new-signup.test.ts
+      fakes.ts
+```
+
+#### `skills/signup/SKILL.md`
+
+````markdown
+---
+name: signup
+description: Use when writing the signup handler of this service. Covers the response codes and the shape of what it answers.
+---
+
+# Signup handlers
+
+A signup handler never throws and never reaches for the database itself: it receives what it needs as parameters and answers with `{ status, body }`.
+
+| Case | `status` | `body` |
+|---|---|---|
+| The input is valid and the email is free | `201` | the user `createUser` returned |
+| The email is already registered | `409` | `{ error: 'email-taken' }` |
+| The email or the password is invalid | `422` | `{ errors: { email?: string, password?: string } }` |
+
+A password needs at least 12 characters. Call `createUser` only when the input is valid and the email is free.
+
+Never put the password in a log line or in a response.
+````
+
+The skill is written as for any other project; nothing in it is for the tests. Most of its conventions are something a test can check. The last one is for the judge.
+
+#### `evals/signup.json`
+
+```json
+{
+  "skill": "signup",
+  "scenarios": [
+    {
+      "id": "new-signup",
+      "critical": true,
+      "prompt": "Write the signup function of our web service. It takes the email and the password the user typed. It is given two functions to call: `isEmailTaken(email)`, which says whether the email is already registered, and `createUser({ email, password })`, which saves the new user and returns it. The function answers with the HTTP status and the body to send back.",
+      "criteria": [
+        "Never writes the password to a log"
+      ],
+      "output": {
+        "result": "a function (deps: { isEmailTaken, createUser }) => async (input: { email, password }) => { status, body }",
+        "reason": "one or two sentences on why the code looks like this"
+      }
+    }
+  ]
+}
+```
+
+- `prompt` names the two functions the code is given, because the task needs them, and says nothing about status codes. If it did, the baseline would answer 409 too, and the scenario would measure nothing.
+- `criteria` is still allowed. This one is something no test can see: whether the code logs the password.
+- `output` is the contract ([below](#the-output-contract)). `result` is what the tests call: a function that takes the dependencies and returns the handler. `reason` is optional; the tests ignore it, and it is there for you to read when you troubleshoot.
+
+#### `skill-tests/signup/new-signup.test.ts`
+
+```ts
+import assert from 'node:assert/strict';
+import { tests } from '@ngwes/skill-be/testing';
+import { fakeDeps, type Signup } from './fakes.js';
+
+const test = tests<{ result: Signup }>();
+
+const input = { email: 'ada@example.com', password: 'correct horse battery' };
+
+test('responds 201 with the new user when the input is valid', async ({ result }) => {
+  const deps = fakeDeps({ taken: false });
+
+  const response = await result(deps)(input);
+
+  assert.equal(response.status, 201);
+  assert.deepEqual(response.body, { id: 1, email: 'ada@example.com' });
+});
+
+test('responds 409 and saves nobody when the email is taken', async ({ result }) => {
+  const deps = fakeDeps({ taken: true });
+
+  const response = await result(deps)(input);
+
+  assert.equal(response.status, 409);
+  assert.equal(deps.created.length, 0);
+});
+
+test('responds 422 and saves nobody when the password is too short', async ({ result }) => {
+  const deps = fakeDeps({ taken: false });
+
+  const response = await result(deps)({ ...input, password: 'short' });
+
+  assert.equal(response.status, 422);
+  assert.equal(deps.created.length, 0);
+});
+```
+
+#### `skill-tests/signup/fakes.ts`
+
+```ts
+export type NewUser = { email: string; password: string };
+
+export type Deps = {
+  isEmailTaken: (email: string) => Promise<boolean>;
+  createUser: (user: NewUser) => Promise<{ id: number; email: string }>;
+};
+
+/** What the contract says `result` is: the editor checks the tests against it. */
+export type Signup = (deps: Deps) => (input: NewUser) => Promise<{ status: number; body: unknown }>;
+
+/**
+ * Dependencies for one test. Nobody has the email unless `taken` is true, and `created` lists the
+ * users the code asked to save.
+ */
+export function fakeDeps({ taken }: { taken: boolean }): Deps & { created: NewUser[] } {
+  const created: NewUser[] = [];
+  return {
+    created,
+    isEmailTaken: async () => taken,
+    createUser: async (user) => {
+      created.push(user);
+      return { id: created.length, email: user.email };
+    },
+  };
+}
+```
+
+- The test file is named after the scenario: `<tests>/<skill>/<scenario id>.test.ts`. Nothing in it names the skill or the scenario.
+- Each test gets the fields the model's code exported, here `result`. It calls them with fakes and fails by throwing, which `node:assert` does. No model is called when a test runs.
+- `tests<{ result: Signup }>()` is `test` with the fields typed, for the editor only. It changes nothing at run time.
+- `fakes.ts` is a helper: any file of the skill's tests folder that is not a `<scenario id>.test.ts` is one. See [Writing the tests](#writing-the-tests).
+
+#### `skill-be.yaml`
+
+```yaml
+skills: ./skills
+evals: ./evals
+tests: ./skill-tests
+
+# The model under test and the judge. For apiKeyEnv, see "Credentials" in skill-be's README.
+model:
+  adapter: claude-cli
+  id: claude-sonnet-5-5
+  apiKeyEnv: ANTHROPIC_API_KEY
+grader:
+  adapter: claude-cli
+  id: claude-haiku-5-5
+  apiKeyEnv: ANTHROPIC_API_KEY
+
+# 1 scenario x 3 reps x 2 arms = 6 generations. The judge grades the criterion of each; the tests
+# run against each.
+reps: 3
+gradings: 1
+
+withSkillTemplate: |-
+  Follow these conventions when writing the code.
+
+  --- CONVENTIONS ---
+  {{skill}}
+  --- END CONVENTIONS ---
+
+  Task: {{task}}
+
+# The skill has no code examples to typecheck.
+checks:
+  typecheck: false
+```
+
+`tests` is the only key a project needs for code tests: the folder that holds them. The rest is a judge-only config, with a template that calls the skill conventions rather than a library.
+
+`skill-be check` parses the test files. It calls no model, installs nothing and runs no test:
+
+```
+typecheck: off
+coverage: off
+code tests: 2 test file(s) parse
+Result: pass
+```
+
+(`2 test file(s)` counts every TypeScript file under the skill's tests folder and `_shared`, helpers included.)
+
+This is what the model under test gets in the baseline arm: the task, then the contract as a fixed paragraph. In the with-skill arm the paragraph follows the filled `withSkillTemplate` instead, word for word the same.
+
+```
+Write the signup function of our web service. It takes the email and the password the user typed. It is given two functions to call: `isEmailTaken(email)`, which says whether the email is already registered, and `createUser({ email, password })`, which saves the new user and returns it. The function answers with the HTTP status and the body to send back.
+
+Answer format: reply with exactly one TypeScript code block. The code must be a complete ES module that exports these names:
+- `result`: a function (deps: { isEmailTaken, createUser }) => async (input: { email, password }) => { status, body }
+- `reason`: one or two sentences on why the code looks like this
+```
+
+`skill-be run` makes the 6 generations, grades each once for the criterion and runs the tests on each. The test lines come after the criteria. The numbers here only show the shape of the report; they are not from a real run:
+
+```
+| Criterion | Baseline | With skill | Delta |
+|-----------|----------|------------|-------|
+| Never writes the password to a log | 100% | 100% | +0pp |
+| [test] responds 201 with the new user when the input is valid | 0% | 100% | +100pp |
+| [test] responds 409 and saves nobody when the email is taken | 67% | 100% | +33pp |
+| [test] responds 422 and saves nobody when the password is too short | 0% | 100% | +100pp |
+```
+
+### The output contract
+
+`output` is an object on a scenario, next to `prompt` and `criteria`.
+
+| Part | Rule |
+|---|---|
+| each key | A name the code exports: a JavaScript identifier |
+| each value | Its description: a non-empty string of at most 200 characters |
+| `result` | Required. What the tests are written against |
+| other keys | Optional exports, such as `reason` |
+
+A scenario needs `criteria`, an `output`, or both. A scenario with an `output` also needs a test file, and the config needs `tests`. A scenario without an `output` gets the prompt it has always had.
+
+skill-be writes the instruction itself from a fixed template, one line per field in the order of the eval file, and adds it after a blank line to the end of the prompt of each arm: after the task in the baseline, after the filled `withSkillTemplate` with the skill. Both arms get the same text, and it is never part of the skill text. The example above shows the result.
+
+**The contract must only shape the answer.** It reaches the baseline too, so whatever it says, the model has without the skill. Use it to say what to export and what shape it has. Never use it to say how to solve the task:
+
+- Fine: `a function (deps: { isEmailTaken, createUser }) => async (input) => { status, body }`. It is a shape, and the task prompt has already named every word in it.
+- Not fine: `a function that answers 409 for a taken email, with { error: 'email-taken' }`. It teaches the skill to the baseline, and the difference you measure shrinks without anyone noticing. The same goes for the name of an API the skill teaches.
+
+The [hint-word check](#the-hint-word-check) catches names. It cannot catch a technique, so read your contracts.
+
+How skill-be reads the answer:
+
+- It takes the last code block of the reply tagged `ts`, `typescript`, `js` or `javascript`. What the reply says around the block does not matter.
+- The block is an ES module, and its named exports are the fields (`export const result = ...`).
+- It is transpiled with TypeScript without a type check: a type error does not fail a test. A runtime error when the module loads does.
+- A reply with no such block, a module that throws when loaded, or one with no `result` export fails every test of that answer. A field other than `result` that the code did not export reaches the tests as `undefined`.
+
+### The hint-word check
+
+A contract that names something only the skill teaches (an API name, say) hints the baseline. Before any model call, `skill-be check` and the start of `skill-be run` look for it and print a warning on stderr for each hit. A warning never blocks.
+
+The check builds a list of words, then looks for them in each field description of each contract:
+
+- **The words.** When [`checks.coverage`](#coverage) is configured, the list is the API names it reads (its `ignore` list is not applied, so a generic name such as `map` can appear). Otherwise it is the identifiers of three or more characters in the skill's code blocks and inline code, without TypeScript keywords and built-ins such as `const`, `string` or `Promise`.
+- **Dropped.** A word the scenario's task prompt contains: the baseline sees it already. A word in `codeTests.allow`.
+- **Matched** as a whole word, with the same case, in each description. A hit is a warning with the skill, the scenario, the field and the word.
+
+Say the description of `result` in the example ended with `, where body is { errors } for a rejection`. `errors` is in the skill and not in the task prompt, so `check` prints:
+
+```
+warning: skill "signup" / scenario "new-signup": output.result names "errors", which the task prompt does not use. The baseline sees the output contract too, so this hints it.
+```
+
+Take the word out of the contract. If the task really has to name it, move it to the prompt, where both arms visibly get it. A word that is not a hint, such as the generic `map`, goes in the `allow` list:
+
+```yaml
+codeTests:
+  allow: [map, filter]
+```
+
+The check has two limits. It catches names, not techniques: a contract that says "split by the largest remainder" passes. And it matches case-sensitively and by spelling alone, so it can miss a word the prompt uses with another meaning in the same case: a prompt that says "validate" as a verb counts as using the skill's function `validate`, and a contract that names it is not warned. A clean check does not mean a clean contract.
+
+### Writing the tests
+
+The tests folder is the `tests` key of `skill-be.yaml`. Inside it, the tests of a skill are found by their place alone; skill-be never runs a test file to learn which scenario it belongs to.
+
+```
+skill-tests/
+  _shared/
+    clock.ts                 helpers for every skill
+  signup/
+    new-signup.test.ts       the tests of the scenario "new-signup"
+    fakes.ts                 a helper
+```
+
+- `<tests>/<skill>/<scenario id>.test.ts` holds the tests of one scenario. The id must be a valid file name.
+- Every other file under `<tests>/<skill>/`, subfolders included, and every file under `<tests>/_shared/` is a helper. Import one with a relative path that ends in `.js`, as in `./fakes.js` or `../_shared/clock.js`, though the file is `.ts`.
+- These are config errors (exit code 2), found by `check`, `verify` and `run` before any model call: a test file named after no scenario; a test file for a scenario that has no `output`; a scenario with an `output` and no test file; an `output` while the config has no `tests`.
+
+The wrapper is `@ngwes/skill-be/testing`, and it is all a test file needs:
+
+- `test(name, fn)` registers a test. `fn` gets one object with the fields the answer exported, by the names of the contract. It may be async, and it fails by throwing or rejecting, so any assertion library works; `node:assert/strict` needs no install.
+- `tests<Fields>()` returns the same `test` with `Fields` typed, for the editor only: `const test = tests<{ result: Signup }>();`. `Fields` must have a `result`.
+- There are no hooks, snapshots or `describe`. Tests of a file run one after the other, in the order the file registers them. A name used twice in a file is an error.
+- The name is the label of the scored line (`[test] <name>`), so write it as a sentence about behaviour. Renaming a test starts a new line in the scores.
+
+A test fails when it throws or rejects, when it runs longer than `codeTests.testTimeoutSeconds` (10 by default), or when an error is thrown and left uncaught while it runs. All the tests of an answer must finish within `codeTests.answerTimeoutSeconds` (60), or skill-be kills the process: the tests that had finished keep their result, and the others fail.
+
+The test files and helpers are compiled with TypeScript, without a type check, so the optional `typescript` peer is required. `check` parses all of them, and a syntax error blocks it (exit code 1). A test file that throws when it loads, or that registers no test, stops `run` before the first model call (exit code 2).
+
+`verify` only hashes files. The fingerprint of a skill with code tests covers its folder under the tests folder, `_shared` and its package list, so changing a test after the last run makes `verify` fail until you run again. For code tests it runs nothing, and needs neither TypeScript nor npm.
+
+### Writing code the tests can feed
+
+A test can call the model's code only when that code runs on its own. The tests run in a plain Node process: no database, no server, none of your services. Ask a model for "a signup endpoint" and it writes an Express app and a database client, and the test has nothing to call.
+
+The contract is the place to fix that, since it shapes the answer. Ask for the dependencies as parameters, and the test passes fakes. In the example `result` is a function that takes `{ isEmailTaken, createUser }` and returns the handler; the test builds `fakeDeps({ taken: true })` and calls it. The fakes also record what the code did to them (`deps.created`), so a test can check that nothing was saved.
+
+- **Name the dependencies in the task prompt.** The model cannot guess them. The example prompt says what `isEmailTaken` and `createUser` do. Since the words are in the prompt, the [hint-word check](#the-hint-word-check) lets the contract use them (`createUser` is in the skill too).
+- **Keep the seam in the contract, not the behaviour.** "A function that takes `{ isEmailTaken, createUser }`" is a seam. What it answers in each case is the skill's to teach.
+- **The same goes for time, randomness and files.** Ask for a `now` function or a `readFile` function as a parameter, and the test passes one that returns what the case needs.
+
+### Libraries the code may import
+
+The code of an answer, and your tests, import libraries from a package list. skill-be installs the list into `.skill-be/deps/<hash>/`, and Node looks there first. That folder is inside your project, so a package you did not list can still resolve from your project's `node_modules`, or from a folder above it. A test can then pass on your machine and fail where that package is not installed, in CI for example: list every package the code needs. Node's built-in modules (`node:assert`) always work.
+
+The list is a JSON file with one section per language. Only `npm` is read:
+
+```json
+{ "npm": ["@ngwes/mini-fp@^2.0.0", "express@5"] }
+```
+
+An entry is anything `npm install` accepts: a version range, a folder, a `.tgz` made by `npm pack`, a git URL. A path (it starts with `.` or `/`, or with a drive letter) is relative to the list file, and so is the path of a `file:` entry (`file:../lib`).
+
+The list a skill with output contracts uses is the first of these that applies:
+
+1. `codeTests.packagesBySkill`, the entry for the skill.
+2. `codeTests.packages`, the list for all skills.
+3. `test-packages.json`, next to `skill-be.yaml`, if it exists.
+4. None: no package is installed.
+
+```yaml
+codeTests:
+  packages: ./test-packages.json
+  packagesBySkill:
+    signup: ./signup-packages.json
+```
+
+A list that the YAML names and that does not exist is a config error. So is a list that is not valid JSON, or a section other than `npm`: it is rejected with a pointer to [the languages issue](https://github.com/ngwes/skill-be/issues/32). `check` reads every list and reports these errors (exit code 2) without installing anything.
+
+Before the first model call, `run` installs each distinct list into its own folder, `.skill-be/deps/<hash>/`. When the list has packages, it prints `installed the test packages of <list> in <folder>` on stderr (`reused …` when it keeps a folder from an earlier run); a list with no package, or no list at all, prints nothing. Skills with the same list share it. The compiled tests and the answers run in a folder inside it, so both import from it. `npm` must be on the PATH, and the install needs the network unless every entry is local. npm runs in that folder, so skill-be copies your project's `.npmrc`, when there is one next to `skill-be.yaml`, into it first: a private registry or its token applies to the install. A failed install stops the command with exit code 2, and its folder is deleted when the command ends, so the next command installs again from scratch. With `--keep-deps` the half-installed folder is kept, but it has no marker, so the next install wipes it first and starts over.
+
+When the command ends, the folder is deleted. A folder skill-be cannot delete (a file still held open, for example) is a warning on stderr, `warning: could not remove <folder> (<reason>)`, and does not change the exit code. `skill-be run --keep-deps` and `skill-be triage --keep-deps` keep it, and the next command reuses it while the entries of the list are the same. skill-be compares the entries, not what is behind them: after you repack a `.tgz` under the same name, delete `.skill-be/deps`. `verify` takes no `--keep-deps`, since it installs nothing.
+
+**A library kept as TypeScript source cannot be listed as it is.** Node 20 runs the code with no TypeScript loader, so `import { Money } from 'tiny-money'` needs JavaScript. List a built folder or an `npm pack` file. For `tiny-money` of the [first example](#example-test-a-skill-end-to-end), compile `lib/index.ts` into a folder, add a `package.json` to it (a `name`, `"type": "module"` and a `main` of `index.js`), then list that folder:
+
+```sh
+npx tsc lib/index.ts --outDir build/tiny-money --module nodenext --target es2022
+```
+
+```json
+{ "npm": ["./build/tiny-money"] }
+```
+
+### Scores and the gate
+
+The scored lines of a scenario are its judge criteria, then its tests, each test as `[test] <name>` in the order its file registers them. The score of a line in an arm is the share of reps that pass, as for a criterion, and the [release gate](#the-release-gate) applies the same rules to a test line:
+
+- a test that passes 0% of the time with the skill, on every model, blocks;
+- in a critical scenario, a test that passes less often with the skill than without it blocks;
+- an answer whose tests could not run is an error ([below](#fail-or-error)), which blocks with `gate.blockOnErrors`.
+
+An answer that gives no loadable `result` fails every test, so a skill that never gets the model to export it shows as 0% on every test line.
+
+The test lines are in the Markdown reports, `summary.json` and the HTML page. In `summary.json` a scenario lists its `criteria` and its `tests`, and the scores of a model run over both, criteria first. For each output the run also writes `rep-<n>-<arm>.tests.json` next to it, with the result and the failure message of each test, and the HTML page shows those messages beside the answer.
+
+#### Fail or error
+
+The model's mistakes fail tests. What skill-be could not run is an error, not a failure. A test that throws fails like any failed assertion, whoever got it wrong.
+
+| What happens | Result |
+|---|---|
+| The reply has no code block, the module throws when it loads, or it has no `result` export | Every test of that answer fails, with the reason as the message |
+| A test throws, or runs longer than `codeTests.testTimeoutSeconds` | That test fails |
+| The code never returns, runs out of memory or crashes the process | The tests that had finished keep their result; the others fail |
+| The tests could not run: the process cannot start, or the answer cannot be written to the run folder | An error: the tests count as 0, it adds to the skill's error count, and `gate.blockOnErrors` blocks on it |
+| Before the first model call: `typescript` missing, a package list missing or invalid, a failed install, a test file that throws when it loads or registers no test | A config error, exit code 2, no model call |
+
+### Triage of code tests
+
+[`skill-be triage`](#triage) covers the tests that blocked a run, and with `--below` those under a threshold, as it covers criteria. A line is shown as `[test] <name>`.
+
+- The fresh samples get the prompts of the with-skill arm, contract included, and run against the tests like any answer. They never see the tests.
+- The classifier prompt scores nothing, so it may show the test file's source and the failure messages: it needs them to tell a skill gap from a test that is too strict.
+- `test error` replaces `grader error` among the categories: the test, not the answer, is wrong.
+
+Triage prepares the packages and the compiled tests only when a test is triaged, and cleans up after itself unless you pass `--keep-deps`.
+
+### Not a sandbox
+
+Code tests run code a model wrote, on your machine. Each answer's tests run in a separate process, in a folder under `.skill-be/deps`, with an environment cut down to what Node and the OS need (`PATH`, the home and temp folders), so your API keys and other variables do not reach it. A timeout kills the process. That is all. It is not a sandbox: the code can read and write what your user can, and it can use the network.
+
+`run` and `triage` print this note when they have code tests to run:
+
+```
+note: code tests run the model's code on this machine, in a separate process without your environment's secrets. It is not a sandbox (see https://github.com/ngwes/skill-be/issues/20).
+```
+
+Run code tests in a throwaway environment, such as a CI job or a container, when you do not trust what the model may write. Container isolation is tracked in [issue 20](https://github.com/ngwes/skill-be/issues/20).
+
+### Other languages
+
+Code tests are TypeScript only for now. The wrapper, the answer format, the loader and the package list are all per language, which is why `test-packages.json` has a section per language. Support for other languages is tracked in [issue 32](https://github.com/ngwes/skill-be/issues/32).
+
 ## Related tools
 
 [skillgrade](https://github.com/mgechev/skillgrade) is an eval harness for coding agents, with or without skills. The two tools answer different questions:
 
-- **skill-be** asks whether a skill makes a model better than it is without the skill. Every scenario runs twice, without and with the skill, and the gate blocks regressions. The answer is one turn of text, graded by an LLM judge. The release gate runs in CI without a model call: `verify` checks a committed result file.
+- **skill-be** asks whether a skill makes a model better than it is without the skill. Every scenario runs twice, without and with the skill, and the gate blocks regressions. The answer is one turn of text, graded by an LLM judge, by [code tests](#code-tests) that run the code in it, or by both. The release gate runs in CI without a model call: `verify` checks a committed result file.
 - **skillgrade** asks how often an agent completes a task. The agent works on real files with its tools, in Docker or locally. The skill is installed where the agent discovers it, and the pass rate is compared with a threshold.
 
 skillgrade is the better fit when the agent has to act: tasks that edit a workspace, run commands or take several turns, a skill the agent has to find on its own, or grading by scripts, rubrics and human review. It supports more agents (Gemini CLI, Codex CLI, ACP-compatible agents) and writes JSON, JUnit, CSV and Markdown reports.
@@ -1343,6 +1777,19 @@ skillgrade is the better fit when the agent has to act: tasks that edit a worksp
 skill-be is the better fit when the question is whether a skill is worth shipping: its effect against a baseline, regressions on critical scenarios, and a gate that costs nothing to run in CI.
 
 Some of skillgrade's strengths are open ideas for skill-be: [deterministic graders](https://github.com/ngwes/skill-be/issues/7), [JUnit reports](https://github.com/ngwes/skill-be/issues/8), [drafting evals from a SKILL.md](https://github.com/ngwes/skill-be/issues/9), [agentic tasks](https://github.com/ngwes/skill-be/issues/10), [a discovery mode](https://github.com/ngwes/skill-be/issues/11) and [more adapters](https://github.com/ngwes/skill-be/issues/12).
+
+[promptfoo](https://www.promptfoo.dev/) is a general tool for testing prompts and models. It runs every prompt against every provider and checks each answer with [assertions](https://www.promptfoo.dev/docs/configuration/expected-outputs/): string and JSON checks, a rubric graded by a model (`llm-rubric`), and custom JavaScript or Python functions. It shows the results in a local web viewer, runs in CI, and also does red teaming.
+
+The two overlap. Two prompts in promptfoo, one with the skill text and one without, are a baseline and a with-skill arm; `llm-rubric` plays the part of skill-be's criteria; a JavaScript assertion can take the code out of an answer and test it. What skill-be adds is what is specific to skills:
+
+- baseline versus with-skill as the shape of every scenario, with the skill pasted in by `withSkillTemplate`;
+- a gate that blocks a criterion at 0% with the skill and a critical scenario that gets worse with it, not only a pass rate;
+- `verify`, which checks a committed result file in CI without a model call;
+- the typecheck of the examples in each `SKILL.md`, the coverage check, and triage of failing criteria;
+- adapters that run Claude Code, pi and opencode without the user's settings, tools or project files;
+- [code tests](#code-tests) that run each answer in its own process, with a package list and an output contract that both arms get.
+
+promptfoo is the better fit for comparing many prompts or providers at once, for red teaming, or when skills are a small part of what you test. skill-be is the better fit when the question is whether a skill is worth shipping.
 
 ## License
 

@@ -1,0 +1,17 @@
+{
+  "skill": "signup",
+  "scenarios": [
+    {
+      "id": "new-signup",
+      "critical": true,
+      "prompt": "Write the signup function of our web service. It takes the email and the password the user typed. It is given two functions to call: `isEmailTaken(email)`, which says whether the email is already registered, and `createUser({ email, password })`, which saves the new user and returns it. The function answers with the HTTP status and the body to send back.",
+      "criteria": [
+        "Never writes the password to a log"
+      ],
+      "output": {
+        "result": "a function (deps: { isEmailTaken, createUser }) => async (input: { email, password }) => { status, body }",
+        "reason": "one or two sentences on why the code looks like this"
+      }
+    }
+  ]
+}

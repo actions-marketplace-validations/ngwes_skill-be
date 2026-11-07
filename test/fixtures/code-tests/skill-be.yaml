@@ -1,0 +1,18 @@
+# One skill graded by its code tests alone, offline: the model is fake-model.mjs, and the package
+# list installs the local folder ./local-lib.
+skills: ./skills
+evals: ./evals
+tests: ./skill-tests
+model:
+  adapter: command
+  id: fake-model
+  run: node fake-model.mjs
+# Never called: the scenario has no criteria. A grader that cannot start would stop the run.
+grader:
+  adapter: command
+  id: no-grader
+  run: skill-be-fixture-no-grader
+reps: 1
+gradings: 1
+checks:
+  typecheck: false

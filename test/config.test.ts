@@ -71,6 +71,14 @@ describe('loadConfig defaults', () => {
       gate: { regressionOnCritical: true, blockOnZero: true, blockOnErrors: true },
       checks: { typecheck: { preset: 'typescript', blocking: true }, coverage: false },
       triage: { model: null },
+      codeTests: {
+        tests: null,
+        packages: null,
+        packagesBySkill: {},
+        testTimeoutSeconds: 10,
+        answerTimeoutSeconds: 60,
+        allow: [],
+      },
     });
   });
 
@@ -218,6 +226,123 @@ describe('loadConfig overrides', () => {
 
     expect(config.grader).toEqual({ adapter: 'pi-cli', id: 'g', provider: 'anthropic' });
     expect(config.triage.model).toEqual({ adapter: './mine.mjs', id: 't', temperature: 0 });
+  });
+});
+
+describe('loadConfig codeTests', () => {
+  it('defaults codeTests when absent', async () => {
+    const config = await loadConfig(await write(MINIMAL), { typescriptInstalled: () => true });
+
+    expect(config.codeTests).toEqual({
+      tests: null,
+      packages: null,
+      packagesBySkill: {},
+      testTimeoutSeconds: 10,
+      answerTimeoutSeconds: 60,
+      allow: [],
+    });
+  });
+
+  it('resolves tests, packages and packagesBySkill against the config root', async () => {
+    const absolute = path.join(dir, 'elsewhere', 'extra.json');
+    const nested = path.join(dir, 'conf');
+    await mkdir(nested);
+    const file = await write(
+      MINIMAL +
+        [
+          'tests: ../tests',
+          'codeTests:',
+          '  packages: ./pkgs/default.json',
+          '  packagesBySkill:',
+          '    option: ./pkgs/option.json',
+          `    extra: ${JSON.stringify(absolute)}`,
+          '  testTimeoutSeconds: 5',
+          '  answerTimeoutSeconds: 90.5',
+          '  allow: [Foo, bar]',
+          '',
+        ].join('\n'),
+      'conf/skill-be.yaml',
+    );
+
+    const config = await loadConfig(file, { typescriptInstalled: () => true });
+
+    expect(config.codeTests).toEqual({
+      tests: path.join(dir, 'tests'),
+      packages: path.join(nested, 'pkgs', 'default.json'),
+      packagesBySkill: {
+        option: path.join(nested, 'pkgs', 'option.json'),
+        extra: absolute,
+      },
+      testTimeoutSeconds: 5,
+      answerTimeoutSeconds: 90.5,
+      allow: ['Foo', 'bar'],
+    });
+  });
+
+  it('accepts the largest timeouts a timer can hold', async () => {
+    const file = await write(
+      MINIMAL + 'codeTests:\n  testTimeoutSeconds: 2147483\n  answerTimeoutSeconds: 2147483\n',
+    );
+
+    const config = await loadConfig(file, { typescriptInstalled: () => true });
+
+    expect(config.codeTests.testTimeoutSeconds).toBe(2147483);
+    expect(config.codeTests.answerTimeoutSeconds).toBe(2147483);
+  });
+
+  it('rejects an unknown key under codeTests', async () => {
+    const error = await failure(MINIMAL + 'codeTests:\n  timeout: 5\n');
+
+    expect(error.message).toContain('unknown key "codeTests.timeout"');
+    expect(error.message).toContain('packagesBySkill');
+  });
+
+  it('rejects a non-positive testTimeoutSeconds', async () => {
+    const error = await failure(MINIMAL + 'codeTests:\n  testTimeoutSeconds: 0\n');
+
+    expect(error.message).toContain('"codeTests.testTimeoutSeconds" must be a positive number');
+  });
+
+  it('rejects an answerTimeoutSeconds a timer cannot hold', async () => {
+    const error = await failure(MINIMAL + 'codeTests:\n  answerTimeoutSeconds: 2147484\n');
+
+    expect(error.message).toMatch(
+      /"codeTests\.answerTimeoutSeconds" must be at most 2147483 .*\(got 2147484\)/,
+    );
+  });
+
+  it('rejects a packagesBySkill value that is not a non-empty string', async () => {
+    const error = await failure(
+      MINIMAL + 'codeTests:\n  packagesBySkill:\n    option: ./a.json\n    result: 3\n',
+    );
+
+    expect(error.message).toContain(
+      '"codeTests.packagesBySkill.result" must be a non-empty string',
+    );
+  });
+
+  it.each([
+    ['a codeTests that is not a mapping', 'codeTests: [a]\n', /"codeTests" must be a mapping/],
+    ['an empty tests', 'tests: ""\n', /"tests" must be a non-empty string/],
+    [
+      'an empty packages',
+      'codeTests:\n  packages: ""\n',
+      /"codeTests\.packages" must be a non-empty string/,
+    ],
+    [
+      'a packagesBySkill that is not a mapping',
+      'codeTests:\n  packagesBySkill: [a.json]\n',
+      /"codeTests\.packagesBySkill" must be a mapping/,
+    ],
+    [
+      'an allow that is not a list of strings',
+      'codeTests:\n  allow: Foo\n',
+      /"codeTests\.allow" must be a list of non-empty strings/,
+    ],
+  ])('rejects %s', async (_name, yaml, pattern) => {
+    const error = await failure(MINIMAL + yaml);
+
+    expect(error.message).toMatch(pattern);
   });
 });
 

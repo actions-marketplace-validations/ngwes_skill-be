@@ -1,0 +1,12 @@
+{
+  "scenarios": [
+    {
+      "id": "adds",
+      "critical": true,
+      "prompt": "Write a function that takes two numbers and returns their sum.",
+      "output": {
+        "result": "a function (a, b) => number that returns the sum of a and b"
+      }
+    }
+  ]
+}

@@ -3,6 +3,9 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { AdapterError, type Adapter, type AdapterContext } from '../src/adapters/index.js';
+import { contractParagraph } from '../src/code-tests/contract.js';
+import type { TestOutcome } from '../src/code-tests/execute.js';
+import type { CodeTestResult } from '../src/code-tests/runtime.js';
 import { modelLabels, resultsTimestamp, runSkill } from '../src/runner.js';
 import {
   ConfigError,
@@ -44,6 +47,14 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
     gate: { regressionOnCritical: true, blockOnZero: true, blockOnErrors: true },
     checks: { typecheck: false, coverage: false },
     triage: { model: null },
+    codeTests: {
+      tests: null,
+      packages: null,
+      packagesBySkill: {},
+      testTimeoutSeconds: 10,
+      answerTimeoutSeconds: 60,
+      allow: [],
+    },
     ...overrides,
   };
 }
@@ -53,6 +64,8 @@ const scenario = (id: string, criteria = ['c1', 'c2']): Scenario => ({
   critical: false,
   prompt: `Task for ${id}`,
   criteria,
+  output: null,
+  tests: [],
 });
 
 function makeSuite(scenarios: Scenario[] = [scenario('s1')], skillText = 'the skill'): SkillSuite {
@@ -62,6 +75,9 @@ function makeSuite(scenarios: Scenario[] = [scenario('s1')], skillText = 'the sk
     skillText,
     evalPath: path.join(root, 'evals', 'demo.json'),
     scenarios,
+    testFiles: {},
+    codeFiles: [],
+    packageList: null,
   };
 }
 
@@ -88,6 +104,39 @@ function fakes(model: Adapter, grader: Adapter = keywordGrader): Deps {
     adapterFor: async (settings) => (settings === GRADER ? grader : model),
     log: () => {},
     timestamp: 'T1',
+  };
+}
+
+/** A scenario with an output contract and code tests, as `prepareCodeTests` fills it. */
+const tested = (id: string, criteria: string[], tests: string[]): Scenario => ({
+  ...scenario(id, criteria),
+  output: { result: 'the value' },
+  tests,
+});
+
+type RunCall = { skill: string; scenarioId: string; output: string };
+
+/**
+ * A fake `codeTests.run` that records its calls and answers with `result(call)`; by default each
+ * test of `names` passes when the answer contains "good".
+ */
+function fakeCodeTests(
+  names: string[],
+  result: (call: RunCall) => CodeTestResult = ({ output }) => ({
+    outcomes: names.map((name) => ({ name, pass: output.includes('good'), message: '' })),
+    infraError: null,
+  }),
+): { run: (skill: string, scenarioId: string, output: string) => Promise<CodeTestResult> } & {
+  calls: RunCall[];
+} {
+  const calls: RunCall[] = [];
+  return {
+    calls,
+    run: async (skill, scenarioId, output) => {
+      const call = { skill, scenarioId, output };
+      calls.push(call);
+      return result(call);
+    },
   };
 }
 
@@ -123,6 +172,26 @@ describe('runSkill prompts', () => {
     await runSkill(makeSuite(undefined, 'uses $& and {{task}}'), makeConfig(), fakes(model));
 
     expect(prompts.filter(isWithSkill)).toEqual(['SKILL<uses $& and {{task}}>\nTASK<Task for s1>']);
+  });
+
+  it('sends the contract paragraph to both arms', async () => {
+    const prompts: string[] = [];
+    const model: Adapter = async (prompt) => {
+      prompts.push(prompt);
+      return 'good';
+    };
+    const contract = { result: 'the value', reason: 'why' };
+    const withContract: Scenario = { ...scenario('s1'), output: contract };
+
+    await runSkill(makeSuite([withContract]), makeConfig(), fakes(model));
+
+    const paragraph = contractParagraph(contract);
+    expect(prompts.filter(isWithSkill)).toEqual([
+      `SKILL<the skill>\nTASK<Task for s1>\n\n${paragraph}`,
+    ]);
+    expect(prompts.filter((prompt) => !isWithSkill(prompt))).toEqual([
+      `Task for s1\n\n${paragraph}`,
+    ]);
   });
 
   it('sends the grader the configured instructions, settings, timeout and cwd', async () => {
@@ -326,6 +395,7 @@ describe('runSkill files', () => {
       for (const arm of ['baseline', 'with-skill'] as const) {
         const file = path.join(dir, `rep-${r + 1}-${arm}`);
         expect(rep[arm].output).toBe(await readFile(`${file}.md`, 'utf8'));
+        expect(rep[arm].tests).toEqual([]);
         expect(rep[arm].gradings).toHaveLength(2);
         for (const [k, answer] of rep[arm].gradings.entries()) {
           expect(answer).toBe(await readFile(`${file}.grading-${k + 1}.md`, 'utf8'));
@@ -334,8 +404,8 @@ describe('runSkill files', () => {
     }
     // A failed output keeps its error text and has no grader answers.
     expect(s2?.map((rep) => rep['with-skill'])).toEqual([
-      { output: '[ERROR: down]\n', gradings: [] },
-      { output: '[ERROR: down]\n', gradings: [] },
+      { output: '[ERROR: down]\n', gradings: [], tests: [] },
+      { output: '[ERROR: down]\n', gradings: [], tests: [] },
     ]);
   });
 
@@ -388,6 +458,333 @@ describe('runSkill files', () => {
     const dirs = ['a_same', 'b_same', 'openai_gpt'];
     expect((await readdir(path.join(demo, 'a_b'))).sort()).toEqual(dirs);
     expect((await readdir(path.join(demo, 'a_b-2'))).sort()).toEqual(dirs);
+  });
+});
+
+describe('runSkill code tests', () => {
+  const TESTS = ['responds 201', 'rejects a bad body'];
+  const outputDir = (): string => path.join(root, 'results', 'T1', 'demo', 's1', 'm1');
+  const allPass = (names: string[]): TestOutcome[] =>
+    names.map((name) => ({ name, pass: true, message: '' }));
+  const allFail = (names: string[], message: string): TestOutcome[] =>
+    names.map((name) => ({ name, pass: false, message }));
+
+  it('scores each test as a line after the criteria', async () => {
+    const model: Adapter = async (prompt) => (isWithSkill(prompt) ? 'good code' : 'bad code');
+    const codeTests = fakeCodeTests(TESTS, ({ output }) => ({
+      outcomes: [
+        { name: 'responds 201', pass: true, message: '' },
+        { name: 'rejects a bad body', pass: output.includes('good'), message: '' },
+      ],
+      infraError: null,
+    }));
+
+    const run = await runSkill(
+      makeSuite([tested('s1', ['c1', 'c2'], TESTS)]),
+      makeConfig({ reps: 2 }),
+      { ...fakes(model), codeTests },
+    );
+
+    expect(run.errorCount).toBe(0);
+    expect(run.scenarios[0]?.models[0]).toEqual({
+      model: 'm1',
+      criteria: [
+        { baselinePct: 0, withSkillPct: 100 },
+        { baselinePct: 0, withSkillPct: 0 },
+        { baselinePct: 100, withSkillPct: 100 },
+        { baselinePct: 0, withSkillPct: 100 },
+      ],
+      notes: [],
+      errors: 0,
+      outputs: expect.any(Array),
+    });
+    const calls = codeTests.calls.map((call) => [call.skill, call.scenarioId, call.output]);
+    expect(calls.sort()).toEqual([
+      ['demo', 's1', 'bad code'],
+      ['demo', 's1', 'bad code'],
+      ['demo', 's1', 'good code'],
+      ['demo', 's1', 'good code'],
+    ]);
+  });
+
+  it('runs the code tests only for the scenarios that have tests', async () => {
+    const codeTests = fakeCodeTests(['t1']);
+
+    const run = await runSkill(
+      makeSuite([scenario('s1'), tested('s2', ['c1', 'c2'], ['t1'])]),
+      makeConfig(),
+      { ...fakes(async () => 'good'), codeTests },
+    );
+
+    expect(codeTests.calls.map((call) => call.scenarioId)).toEqual(['s2', 's2']);
+    expect(run.scenarios.map((s) => s.models[0]?.criteria.length)).toEqual([2, 3]);
+  });
+
+  it('skips the judge for a scenario without criteria', async () => {
+    let graderCalls = 0;
+    const grader: Adapter = async () => {
+      graderCalls++;
+      return verdicts();
+    };
+    const model: Adapter = async (prompt) => (isWithSkill(prompt) ? 'good' : 'bad');
+
+    const run = await runSkill(makeSuite([tested('s1', [], ['t1'])]), makeConfig(), {
+      ...fakes(model, grader),
+      codeTests: fakeCodeTests(['t1']),
+    });
+
+    expect(graderCalls).toBe(0);
+    expect(run.errorCount).toBe(0);
+    const result = run.scenarios[0]?.models[0];
+    expect(result?.criteria).toEqual([{ baselinePct: 0, withSkillPct: 100 }]);
+    expect(result?.notes).toEqual([]);
+    expect(result?.outputs[0]?.baseline.gradings).toEqual([]);
+    expect((await readdir(outputDir())).sort()).toEqual([
+      'rep-1-baseline.md',
+      'rep-1-baseline.tests.json',
+      'rep-1-with-skill.md',
+      'rep-1-with-skill.tests.json',
+    ]);
+  });
+
+  it('counts an infra error as an error and the test lines as 0', async () => {
+    const model: Adapter = async (prompt) => (isWithSkill(prompt) ? 'good skill' : 'good base');
+    const codeTests = fakeCodeTests(TESTS, ({ output }) =>
+      output.includes('skill')
+        ? { outcomes: allFail(TESTS, 'npm is gone'), infraError: 'npm is gone' }
+        : { outcomes: allPass(TESTS), infraError: null },
+    );
+
+    const run = await runSkill(makeSuite([tested('s1', ['c1', 'c2'], TESTS)]), makeConfig(), {
+      ...fakes(model),
+      codeTests,
+    });
+
+    expect(run.errorCount).toBe(1);
+    expect(run.scenarios[0]?.models[0]).toEqual({
+      model: 'm1',
+      criteria: [
+        { baselinePct: 100, withSkillPct: 100 },
+        { baselinePct: 0, withSkillPct: 0 },
+        { baselinePct: 100, withSkillPct: 0 },
+        { baselinePct: 100, withSkillPct: 0 },
+      ],
+      notes: ['[ERROR] rep 1 with skill — code tests could not run: npm is gone'],
+      errors: 1,
+      outputs: expect.any(Array),
+    });
+  });
+
+  it('does not count a failing test as an error', async () => {
+    const codeTests = fakeCodeTests(TESTS, () => ({
+      outcomes: allFail(TESTS, 'expected 201, got 500'),
+      infraError: null,
+    }));
+
+    const run = await runSkill(makeSuite([tested('s1', [], TESTS)]), makeConfig(), {
+      ...fakes(async () => 'good'),
+      codeTests,
+    });
+
+    expect(run.errorCount).toBe(0);
+    expect(run.scenarios[0]?.models[0]).toEqual({
+      model: 'm1',
+      criteria: [
+        { baselinePct: 0, withSkillPct: 0 },
+        { baselinePct: 0, withSkillPct: 0 },
+      ],
+      notes: [],
+      errors: 0,
+      outputs: expect.any(Array),
+    });
+  });
+
+  it('still runs the tests when every grading fails, and counts one error', async () => {
+    const codeTests = fakeCodeTests(TESTS, () => ({ outcomes: allPass(TESTS), infraError: null }));
+
+    const run = await runSkill(makeSuite([tested('s1', ['c1'], TESTS)]), makeConfig(), {
+      ...fakes(
+        async (prompt) => (isWithSkill(prompt) ? 'skill answer' : 'good'),
+        async (prompt) => (answerIn(prompt) === 'skill answer' ? 'garbage' : verdicts(true)),
+      ),
+      codeTests,
+    });
+
+    expect(run.errorCount).toBe(1);
+    expect(codeTests.calls).toHaveLength(2);
+    expect(run.scenarios[0]?.models[0]?.criteria).toEqual([
+      { baselinePct: 100, withSkillPct: 0 },
+      { baselinePct: 100, withSkillPct: 100 },
+      { baselinePct: 100, withSkillPct: 100 },
+    ]);
+  });
+
+  it('counts a grading failure and an infra error on one output as two errors', async () => {
+    const codeTests = fakeCodeTests(TESTS, () => ({
+      outcomes: allFail(TESTS, 'no npm'),
+      infraError: 'no npm',
+    }));
+
+    const run = await runSkill(makeSuite([tested('s1', ['c1'], TESTS)]), makeConfig(), {
+      ...fakes(
+        async (prompt) => (isWithSkill(prompt) ? 'skill answer' : 'good'),
+        async (prompt) => (answerIn(prompt) === 'skill answer' ? 'garbage' : verdicts(true)),
+      ),
+      codeTests,
+    });
+
+    // The baseline's infra error, then the with-skill output's grading failure and infra error.
+    expect(run.errorCount).toBe(3);
+    expect(run.scenarios[0]?.models[0]?.notes).toEqual([
+      '[ERROR] rep 1 baseline — code tests could not run: no npm',
+      '[ERROR] rep 1 with skill — every grading failed after retry, criteria counted as 0: ' +
+        'unparseable grader answer: "garbage"',
+      '[ERROR] rep 1 with skill — code tests could not run: no npm',
+    ]);
+  });
+
+  it('runs neither the judge nor the tests for an output that could not be generated', async () => {
+    const model: Adapter = async (prompt) => {
+      if (isWithSkill(prompt)) throw new Error('down');
+      return 'good';
+    };
+    const codeTests = fakeCodeTests(TESTS);
+
+    const run = await runSkill(makeSuite([tested('s1', ['c1', 'c2'], TESTS)]), makeConfig(), {
+      ...fakes(model),
+      codeTests,
+    });
+
+    expect(codeTests.calls.map((call) => call.output)).toEqual(['good']);
+    expect(run.errorCount).toBe(1);
+    const result = run.scenarios[0]?.models[0];
+    expect(result?.criteria).toEqual([
+      { baselinePct: 100, withSkillPct: 0 },
+      { baselinePct: 0, withSkillPct: 0 },
+      { baselinePct: 100, withSkillPct: 0 },
+      { baselinePct: 100, withSkillPct: 0 },
+    ]);
+    expect(result?.notes).toEqual([
+      '[ERROR] rep 1 with skill — generation failed, criteria counted as 0: down',
+    ]);
+    expect(result?.outputs[0]?.['with-skill']).toEqual({
+      output: '[ERROR: down]\n',
+      gradings: [],
+      tests: [],
+    });
+    expect((await readdir(outputDir())).sort()).toEqual([
+      'rep-1-baseline.grading-1.md',
+      'rep-1-baseline.md',
+      'rep-1-baseline.tests.json',
+      'rep-1-with-skill.md',
+    ]);
+  });
+
+  it('writes the test outcomes beside the output', async () => {
+    const outcomes: TestOutcome[] = [
+      { name: 'responds 201', pass: true, message: '' },
+      { name: 'rejects a bad body', pass: false, message: 'expected 400, got 200' },
+    ];
+    const codeTests = fakeCodeTests(TESTS, () => ({ outcomes, infraError: null }));
+
+    const run = await runSkill(makeSuite([tested('s1', ['c1', 'c2'], TESTS)]), makeConfig(), {
+      ...fakes(async () => 'good'),
+      codeTests,
+    });
+
+    for (const arm of ['baseline', 'with-skill'] as const) {
+      expect(await readFile(path.join(outputDir(), `rep-1-${arm}.tests.json`), 'utf8')).toBe(
+        `${JSON.stringify(outcomes, null, 2)}\n`,
+      );
+      expect(run.scenarios[0]?.models[0]?.outputs[0]?.[arm].tests).toEqual(outcomes);
+    }
+  });
+
+  it('logs the tests passed beside the YES count', async () => {
+    const lines: string[] = [];
+    const codeTests = fakeCodeTests(TESTS, ({ output }) =>
+      output === 'infra'
+        ? { outcomes: allFail(TESTS, 'no npm'), infraError: 'no npm' }
+        : {
+            outcomes: [
+              { name: 'responds 201', pass: true, message: '' },
+              { name: 'rejects a bad body', pass: false, message: 'x' },
+            ],
+            infraError: null,
+          },
+    );
+
+    const model: Adapter = async (prompt) =>
+      isWithSkill(prompt) && prompt.includes('s2') ? 'infra' : 'good';
+
+    await runSkill(
+      makeSuite([tested('s1', ['c1', 'c2'], TESTS), tested('s2', [], TESTS)]),
+      makeConfig(),
+      { ...fakes(model), codeTests, log: (line) => lines.push(line) },
+    );
+
+    // The time each output took, as `(Ns)`.
+    const untimed = lines.map((line) => line.replace(/ \(\d+\.\ds\)$/, ' (Ns)'));
+    expect(untimed).toContain('  [s1] m1 rep 1/1 baseline: 1/2 YES, 1/2 tests passed (Ns)');
+    expect(untimed).toContain('  [s2] m1 rep 1/1 baseline: 1/2 tests passed (Ns)');
+    expect(untimed).toContain('  [s2] m1 rep 1/1 with skill: tests could not run (Ns)');
+  });
+
+  it('runs the tests through the limiter of the model calls', async () => {
+    let inFlight = 0;
+    let peak = 0;
+    const tracked = async <T>(ms: number, value: T): Promise<T> => {
+      inFlight++;
+      peak = Math.max(peak, inFlight);
+      await new Promise((resolve) => setTimeout(resolve, ms));
+      inFlight--;
+      return value;
+    };
+    const codeTests = {
+      run: (): Promise<CodeTestResult> =>
+        tracked(20, { outcomes: allPass(['t1']), infraError: null }),
+    };
+
+    await runSkill(
+      makeSuite([tested('s1', ['c1'], ['t1']), tested('s2', ['c1'], ['t1'])]),
+      makeConfig({ reps: 3, concurrency: 2 }),
+      {
+        ...fakes(
+          () => tracked(1, 'good'),
+          () => tracked(1, verdicts(true)),
+        ),
+        codeTests,
+      },
+    );
+
+    expect(peak).toBe(2);
+  });
+
+  it('throws before any model call when a scenario has tests and no codeTests', async () => {
+    let modelCalls = 0;
+    const model: Adapter = async () => {
+      modelCalls++;
+      return 'good';
+    };
+    const suite = makeSuite([scenario('s0'), tested('s1', ['c1'], ['t1'])]);
+
+    await expect(runSkill(suite, makeConfig(), fakes(model))).rejects.toThrow('scenario "s1" of skill "demo" has code tests, but no codeTests were given');
+    expect(modelCalls).toBe(0);
+  });
+
+  it('throws before any model call when a scenario has nothing to score', async () => {
+    let modelCalls = 0;
+    const model: Adapter = async () => {
+      modelCalls++;
+      return 'good';
+    };
+    const suite = makeSuite([scenario('s0'), tested('s1', [], [])]);
+    const codeTests = fakeCodeTests([]);
+
+    const running = runSkill(suite, makeConfig(), { ...fakes(model), codeTests });
+    await expect(running).rejects.toThrow('scenario "s1" of skill "demo" has nothing to score');
+    await expect(running).rejects.not.toBeInstanceOf(ConfigError);
+    expect(modelCalls).toBe(0);
   });
 });
 
