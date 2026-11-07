@@ -1,7 +1,9 @@
 /**
- * The libraries the code of an answer may import. They come from a package list, never from the
- * project's own `node_modules`: the list is read from a file, and installed once into a folder of
- * its own under `<root>/.skill-be/deps/`, which the answers and the test files run in.
+ * The libraries the code of an answer may import. They come from a package list: the list is read
+ * from a file, and installed once into a folder of its own under `<root>/.skill-be/deps/`, which
+ * the answers and the test files run in, so Node looks there first. That folder is inside the
+ * project, so a package that is not listed can still resolve from the project's own
+ * `node_modules` (or a folder above it): nothing here prevents it.
  */
 
 import { createHash } from 'node:crypto';

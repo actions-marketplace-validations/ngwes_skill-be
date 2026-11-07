@@ -1625,7 +1625,7 @@ codeTests:
   allow: [map, filter]
 ```
 
-The check has two limits. It catches names, not techniques: a contract that says "split by the largest remainder" passes. And it matches case-sensitively, so it can miss a word the prompt uses with another meaning (the verb "validate" and a function `Validate`). A clean check does not mean a clean contract.
+The check has two limits. It catches names, not techniques: a contract that says "split by the largest remainder" passes. And it matches case-sensitively and by spelling alone, so it can miss a word the prompt uses with another meaning in the same case: a prompt that says "validate" as a verb counts as using the skill's function `validate`, and a contract that names it is not warned. A clean check does not mean a clean contract.
 
 ### Writing the tests
 
@@ -1669,7 +1669,7 @@ The contract is the place to fix that, since it shapes the answer. Ask for the d
 
 ### Libraries the code may import
 
-The code of an answer, and your tests, import libraries from a package list. They never see the `node_modules` of your project. Node's built-in modules (`node:assert`) always work.
+The code of an answer, and your tests, import libraries from a package list. skill-be installs the list into `.skill-be/deps/<hash>/`, and Node looks there first. That folder is inside your project, so a package you did not list can still resolve from your project's `node_modules`, or from a folder above it. A test can then pass on your machine and fail where that package is not installed, in CI for example: list every package the code needs. Node's built-in modules (`node:assert`) always work.
 
 The list is a JSON file with one section per language. Only `npm` is read:
 
@@ -1723,7 +1723,7 @@ The test lines are in the Markdown reports, `summary.json` and the HTML page. In
 
 #### Fail or error
 
-The model's mistakes fail tests. What belongs to skill-be or to you is never charged to the model.
+The model's mistakes fail tests. What skill-be could not run is an error, not a failure. A test that throws fails like any failed assertion, whoever got it wrong.
 
 | What happens | Result |
 |---|---|
