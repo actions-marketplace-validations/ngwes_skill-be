@@ -16,6 +16,7 @@ import { typecheckSkill, validateTypecheck } from './checks/typecheck.js';
 import { loadTypescript } from './checks/typescript.js';
 import { syntaxErrors } from './code-tests/compile.js';
 import { contractHints } from './code-tests/hints.js';
+import { readPackageList } from './code-tests/packages.js';
 import { cleanupWarnings, prepareCodeTests, type CodeTests } from './code-tests/runtime.js';
 import { loadConfig } from './config.js';
 import { skillFingerprint } from './fingerprint.js';
@@ -378,6 +379,16 @@ async function parseCodeTests(
   };
 }
 
+/**
+ * Reads each package list the code tests of `suites` use, once, without installing anything.
+ *
+ * @throws ConfigError when a list is unreadable or not a valid package list.
+ */
+async function validatePackageLists(suites: SkillSuite[]): Promise<void> {
+  const lists = new Set(suites.filter(hasContracts).map((suite) => suite.packageList));
+  for (const list of lists) if (list !== null) await readPackageList(list);
+}
+
 /** The last line of a command's output, and its exit code. */
 function conclude(ctx: Context, blockers: string[]): number {
   ctx.out(blockers.length === 0 ? 'Result: pass' : `Result: blocked by ${blockers.join(', ')}`);
@@ -570,6 +581,7 @@ async function verifyCommand(args: Args, ctx: Context): Promise<number> {
 
 async function checkCommand(args: Args, ctx: Context): Promise<number> {
   const { config, all } = await loadProject(args, ctx);
+  await validatePackageLists(all);
   for (const warning of await hintWarnings(config, all)) ctx.err(`warning: ${warning}`);
   const checks = await runChecks(config, all);
   const parsed = await parseCodeTests(config, all, ctx.show);

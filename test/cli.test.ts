@@ -760,6 +760,30 @@ describe('code tests', () => {
     expect(stdout).toContain('code tests: 2 test file(s) parse');
   });
 
+  it('check exits 2 on a package list that is not valid JSON', SLOW, async () => {
+    await copyCodeTests();
+    const list = path.join(root, 'test-packages.json');
+    await writeFile(list, '{ "npm": [');
+
+    const { code, stdout, stderr } = await cli('check');
+
+    expect(code).toBe(2);
+    expect(stderr).toContain(`skill-be: ${list}: invalid JSON (`);
+    expect(stdout).toBe('');
+    expect(await installFolders()).toEqual([]);
+  });
+
+  it('check exits 2 on a package list with a section for another language', SLOW, async () => {
+    await copyCodeTests();
+    const list = path.join(root, 'test-packages.json');
+    await writeFile(list, JSON.stringify({ npm: ['./local-lib'], pip: ['requests'] }));
+
+    const { code, stderr } = await cli('check');
+
+    expect(code).toBe(2);
+    expect(stderr).toContain(`skill-be: ${list}: "pip" packages are not supported yet`);
+  });
+
   it('check exits 1 when a test helper does not parse, naming its line', SLOW, async () => {
     await copyCodeTests();
     const helpers = path.join(root, 'skill-tests', 'sum', 'helpers.ts');
