@@ -653,6 +653,34 @@ describe('code tests', () => {
   );
 
   it.skipIf(!hasNpm)(
+    'triage runs fresh samples against a failing code test and cleans up',
+    INSTALLS,
+    async () => {
+      await copyCodeTests();
+      // Without its marker sentence the skill no longer helps: both arms multiply.
+      await writeFile(path.join(root, 'skills', 'sum', 'SKILL.md'), '# Sum\n');
+      expect((await cli('run')).code).toBe(1);
+
+      const triaged = await cli('triage', '--samples', '1');
+
+      expect(triaged.code).toBe(0);
+      expect(triaged.stdout).toContain('sum [adds] fake-model "[test] adds two numbers"');
+      expect(triaged.stderr.split('\n').filter((line) => line === NOTE)).toHaveLength(1);
+      const reports = (await readdir(await runDir())).filter((name) => name.startsWith('triage-'));
+      const report = await readFile(path.join(await runDir(), reports[0]!), 'utf8');
+      expect(report).toContain('### Sample 1 — test: FAIL');
+      expect(report).toContain('result(1, 2) returned 2, expected 3');
+      expect(await installFolders()).toEqual([]);
+
+      expect((await cli('triage', '--samples', '1', '--keep-deps')).code).toBe(0);
+      const [folder, ...others] = await installFolders();
+      expect(others).toEqual([]);
+      const kept = path.join(depsDir(), folder!);
+      expect((await readdir(kept)).filter((name) => name.startsWith('run-'))).toEqual([]);
+    },
+  );
+
+  it.skipIf(!hasNpm)(
     'run removes .skill-be/deps when it is interrupted',
     INSTALLS,
     async () => {
@@ -760,8 +788,8 @@ describe('usage', () => {
     const { stdout } = await cli('--help');
 
     expect(stdout).toContain(
-      '  --keep-deps        run: keeps the installed test packages in .skill-be/deps for the ' +
-        'next run',
+      '  --keep-deps        run, triage: keeps the installed test packages in .skill-be/deps for ' +
+        'the next run',
     );
   });
 

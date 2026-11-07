@@ -61,15 +61,15 @@ Commands:
   verify             Without a model call: checks that the result file matches the current
                      skills, evals and config and records every skill READY, then runs the checks.
   check              Runs the typecheck and coverage checks, and parses the code tests.
-  triage [skill...]  Proposes a classification for each failing criterion of the latest run.
-                     Never blocks.
+  triage [skill...]  Proposes a classification for each failing criterion or code test of the
+                     latest run. Never blocks.
 
 Options:
   --config <path>    The config file (default: ./skill-be.yaml)
   --reps <n>         run: generations per arm per scenario, instead of the config's
   --concurrency <n>  run: model calls in flight at once, instead of the config's
   --html             run: also writes results.html beside summary.json, with every answer
-  --keep-deps        run: keeps the installed test packages in .skill-be/deps for the next run
+  --keep-deps        run, triage: keeps the installed test packages in .skill-be/deps for the next run
   --below <pct>      triage: also triage criteria that scored under pct% with the skill
   --samples <n>      triage: fresh with-skill samples per failing criterion (default: 2)
   -h, --help         Shows this help
@@ -100,7 +100,7 @@ const SYNTAX: Record<CommandName, { options: string[]; flags: string[]; skills: 
   run: { options: ['config', 'reps', 'concurrency'], flags: ['html', 'keep-deps'], skills: true },
   verify: { options: ['config'], flags: [], skills: false },
   check: { options: ['config'], flags: [], skills: false },
-  triage: { options: ['config', 'below', 'samples'], flags: [], skills: true },
+  triage: { options: ['config', 'below', 'samples'], flags: ['keep-deps'], skills: true },
 };
 
 /** What a command prints with and where it is run from. */
@@ -321,7 +321,10 @@ async function runChecks(config: Config, suites: SkillSuite[]): Promise<ChecksOu
   return { lines, blockers };
 }
 
-/** Printed once by `run`, before the first skill with code tests. */
+/**
+ * Printed once by `run`, before the first skill with code tests, and by `triage` before it
+ * prepares them.
+ */
 const SANDBOX_NOTE =
   "note: code tests run the model's code on this machine, in a separate process without your " +
   "environment's secrets. It is not a sandbox (see https://github.com/ngwes/skill-be/issues/20).";
@@ -401,12 +404,15 @@ async function runCommand(args: Args, ctx: Context): Promise<number> {
     log: ctx.err,
   });
   return withCleanup(
-    async () => {
-      const codeTests = await preparing.catch(() => null);
-      await codeTests?.dispose();
-    },
+    () => disposeCodeTests(preparing),
     async () => benchmark(args, ctx, { config, all: project.all, existing }, await preparing),
   );
+}
+
+/** Disposes of the code tests once they are prepared; a preparation that failed cleaned up. */
+async function disposeCodeTests(preparing: Promise<CodeTests> | null): Promise<void> {
+  const codeTests = await preparing?.catch(() => null);
+  await codeTests?.dispose();
 }
 
 /**
@@ -570,10 +576,27 @@ async function triageCommand(args: Args, ctx: Context): Promise<number> {
   const samples = positiveInteger(args, 'samples');
   const { config, selected } = await loadProject(args, ctx);
 
-  const options: TriageOptions = { deps: { log: ctx.err } };
+  // Prepared only when a code test is triaged, and then disposed of the way `run` does.
+  let preparing: Promise<CodeTests> | null = null;
+  const options: TriageOptions = {
+    deps: {
+      log: ctx.err,
+      prepareCodeTests: (suites) => {
+        ctx.err(SANDBOX_NOTE);
+        preparing = prepareCodeTests(config, suites, {
+          keepDeps: args.flags.has('keep-deps'),
+          log: ctx.err,
+        });
+        return preparing;
+      },
+    },
+  };
   below.onSome((value) => (options.below = value));
   samples.onSome((value) => (options.samples = value));
-  const { reportPath, items } = await triage(config, selected, options);
+  const { reportPath, items } = await withCleanup(
+    () => disposeCodeTests(preparing),
+    () => triage(config, selected, options),
+  );
 
   ctx.out(`Triage: ${items.length} failure(s)`);
   for (const item of items) {
@@ -602,9 +625,9 @@ let stopping = false;
 /**
  * Exits with `code` once the in-flight model calls are killed (they run in their own process
  * group on POSIX, so Ctrl+C does not reach them, and work a config error left queued would keep
- * starting them) and the commands in flight have cleaned up: a run removes its compiled tests
- * and, without `--keep-deps`, its installed test packages. Only the first call counts: a command
- * a signal stops still returns a code of its own afterwards.
+ * starting them) and the commands in flight have cleaned up: a run or a triage removes its
+ * compiled tests and, without `--keep-deps`, its installed test packages. Only the first call
+ * counts: a command a signal stops still returns a code of its own afterwards.
  */
 function stop(code: number): void {
   if (stopping) return;
