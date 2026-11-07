@@ -771,6 +771,21 @@ describe('runSkill code tests', () => {
     await expect(runSkill(suite, makeConfig(), fakes(model))).rejects.toThrow('scenario "s1" of skill "demo" has code tests, but no codeTests were given');
     expect(modelCalls).toBe(0);
   });
+
+  it('throws before any model call when a scenario has nothing to score', async () => {
+    let modelCalls = 0;
+    const model: Adapter = async () => {
+      modelCalls++;
+      return 'good';
+    };
+    const suite = makeSuite([scenario('s0'), tested('s1', [], [])]);
+    const codeTests = fakeCodeTests([]);
+
+    const running = runSkill(suite, makeConfig(), { ...fakes(model), codeTests });
+    await expect(running).rejects.toThrow('scenario "s1" of skill "demo" has nothing to score');
+    await expect(running).rejects.not.toBeInstanceOf(ConfigError);
+    expect(modelCalls).toBe(0);
+  });
 });
 
 describe('runSkill config errors', () => {

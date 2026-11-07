@@ -113,7 +113,8 @@ const NO_LINES: Part = { verdicts: [], notes: [], errors: 0, outcome: null };
  * `ConfigError` an adapter throws, or a CLI that cannot start, is not an output error: it rejects
  * `runSkill`, so the CLI can exit with 2 (see `isConfigProblem`).
  *
- * @throws Error, before any call, when a scenario has tests and `deps.codeTests` is not given.
+ * @throws Error, before any call, when a scenario has tests and `deps.codeTests` is not given,
+ * or when a scenario has neither criteria nor tests.
  */
 export async function runSkill(
   suite: SkillSuite,
@@ -128,6 +129,11 @@ export async function runSkill(
       `scenario "${tested.id}" of skill "${suite.name}" has code tests, ` +
         'but no codeTests were given',
     );
+  }
+  // Parsing and `prepareCodeTests` reject such a scenario: it would pass with nothing scored.
+  const unscored = suite.scenarios.find((scenario) => scoredLines(scenario).length === 0);
+  if (unscored !== undefined) {
+    throw new Error(`scenario "${unscored.id}" of skill "${suite.name}" has nothing to score`);
   }
   const log = deps.log ?? ((line: string) => process.stderr.write(`${line}\n`));
   const adapterFor =

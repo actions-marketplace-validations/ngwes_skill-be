@@ -652,6 +652,25 @@ describe('code tests', () => {
     },
   );
 
+  it(
+    'run stops with exit 2 before any model call when a test file registers no tests',
+    INSTALLS,
+    async () => {
+      await copyCodeTests();
+      await unlink(path.join(root, 'test-packages.json'));
+      const testFile = path.join(root, 'skill-tests', 'sum', 'adds.test.ts');
+      await writeFile(testFile, "import { test } from '@ngwes/skill-be/testing';\n");
+
+      const { code, stderr } = await cli('run');
+
+      expect(code).toBe(2);
+      expect(stderr).toContain(`skill-be: ${testFile}: registers no tests`);
+      expect(modelCalled()).toBe(false);
+      expect(existsSync(resultsDir())).toBe(false);
+      expect(await installFolders()).toEqual([]);
+    },
+  );
+
   it.skipIf(!hasNpm)(
     'triage runs fresh samples against a failing code test and cleans up',
     INSTALLS,

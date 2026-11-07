@@ -70,7 +70,7 @@ type PreparedSuite = {
  * `keepDeps`).
  *
  * @throws ConfigError when TypeScript is missing, a package list is missing or invalid or does
- * not install, or a test file throws on load.
+ * not install, or a test file throws on load or registers no tests.
  */
 export async function prepareCodeTests(
   config: Config,
@@ -243,14 +243,19 @@ async function compileFile(
   }
 }
 
-/** The tests a compiled test file registers; a load error names the source file. */
+/**
+ * The tests a compiled test file registers; a load error names the source file.
+ *
+ * @throws ConfigError when the file throws on load or registers no test: a scenario with nothing
+ * to score must not pass.
+ */
 async function listOf(
   config: Config,
   source: string,
   compiled: string,
   cwd: string,
 ): Promise<string[]> {
-  return TryAsync.runAsync(() =>
+  const names = await TryAsync.runAsync(() =>
     listTests({ ...timeouts(config), testFile: compiled, cwd }),
   ).onFail((error) => {
     if (error instanceof ConfigError) {
@@ -258,6 +263,8 @@ async function listOf(
     }
     throw error;
   });
+  if (names.length === 0) throw new ConfigError(`${source}: registers no tests`);
+  return names;
 }
 
 function timeouts(config: Config): { testTimeoutMs: number; answerTimeoutMs: number } {

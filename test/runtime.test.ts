@@ -389,6 +389,14 @@ describe('prepareCodeTests', () => {
     },
   );
 
+  it('rejects a test file that registers no tests, and cleans up', CHILD_TEST, async () => {
+    const source = await put('skill-tests/sum/adds.test.ts', `${IMPORT_TEST}\n`);
+    const preparing = prepare([await makeSuite('sum', [contractScenario('adds')])]);
+    await expect(preparing).rejects.toThrow(ConfigError);
+    await expect(preparing).rejects.toThrow(`${source}: registers no tests`);
+    expect(await readdir(depsRoot())).toEqual([]);
+  });
+
   it('rejects a run of a skill or scenario it did not prepare', CHILD_TEST, async () => {
     await put('skill-tests/sum/adds.test.ts', `${IMPORT_TEST}test('one', () => {});\n`);
     const codeTests = await prepare([await makeSuite('sum', [contractScenario('adds')])]);
