@@ -7,7 +7,7 @@
  */
 
 import { createHash } from 'node:crypto';
-import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { Try, TryAsync, sequenceValidate, type Either } from '@ngwes/mini-fp';
 import type { Runner } from '../adapters/common.js';
@@ -28,9 +28,19 @@ const INSTALL_TIMEOUT_MS = 10 * 60 * 1000;
 const DETAIL_LENGTH = 1000;
 
 /**
+ * How skill-be removes a folder it made: a folder that is already gone is fine, and a removal that
+ * fails because Windows still holds a file of it (a child that just exited) is tried again.
+ */
+export const REMOVE_FOLDER = { recursive: true, force: true, maxRetries: 5, retryDelay: 100 };
+
+/** The prefix of an npm spec that names a local folder or tarball by its path. */
+const FILE_PREFIX = 'file:';
+
+/**
  * The npm specs of a package list: a JSON file `{ "npm": [ ...specs ] }`. A spec that is a local
  * path (it starts with `.` or `/`, or with a drive letter) is made absolute against the folder of
- * the list; every other spec is returned as written.
+ * the list, and so is the path of a `file:` spec, which keeps its prefix (`file:../lib` becomes
+ * `file:/abs/lib`); every other spec is returned as written.
  *
  * @throws ConfigError when the file is missing, unreadable or not a package list, or when it has
  * a section for a language other than npm.
@@ -43,9 +53,19 @@ export async function readPackageList(file: string): Promise<string[]> {
 }
 
 /**
- * Installs `specs` into `<root>/.skill-be/deps/<hash>/`, where the hash is taken over the specs.
- * A folder whose marker holds the same hash is reused without running npm. An empty list still
- * gets its folder, with its `package.json` and marker, but npm does not run.
+ * The folder {@link installPackages} installs `specs` into, `<root>/.skill-be/deps/<hash>/`, where
+ * the hash is taken over the specs: a caller can plan to remove it before the install starts.
+ */
+export function installFolder(specs: string[], root: string): string {
+  return path.resolve(root, '.skill-be', 'deps', hashOf(specs).slice(0, 16));
+}
+
+/**
+ * Installs `specs` into their {@link installFolder}. A folder whose marker holds the same hash is
+ * reused without running npm; any other folder there, such as one an install left half done, is
+ * removed first. An empty list still gets its folder, with its `package.json` and marker, but npm
+ * does not run. The project's `<root>/.npmrc`, when there is one, is copied into the folder for
+ * npm to read (it is not part of the hash).
  *
  * @param run starts npm; `runProcess` unless a test passes a fake.
  * @throws ConfigError when npm cannot start, times out or fails; its message ends with what npm
@@ -56,18 +76,19 @@ export async function installPackages(
   root: string,
   run: Runner = runProcess,
 ): Promise<{ dir: string; reused: boolean }> {
-  const hash = createHash('sha256').update(specs.join('\n')).digest('hex');
-  const dir = path.resolve(root, '.skill-be', 'deps', hash.slice(0, 16));
+  const hash = hashOf(specs);
+  const dir = installFolder(specs, root);
   const marker = path.join(dir, MARKER);
 
   if ((await markerOf(marker)) === hash) return { dir, reused: true };
 
   await TryAsync.runAsync(async () => {
+    await rm(dir, REMOVE_FOLDER);
     await mkdir(dir, { recursive: true });
-    // A marker of another list must not survive an install that fails half way.
-    await rm(marker, { force: true });
     const manifest = { private: true, type: 'module' };
     await writeFile(path.join(dir, 'package.json'), JSON.stringify(manifest, null, 2) + '\n');
+    // npm reads the project's config from the folder it installs in: this one, not the project.
+    if (specs.length > 0) await copyNpmrc(root, dir);
   }).onFail((error) => {
     throw new ConfigError(`cannot prepare ${dir} (${(error as Error).message})`);
   });
@@ -76,15 +97,22 @@ export async function installPackages(
   return { dir, reused: false };
 }
 
-/**
- * How skill-be removes a folder it made: a folder that is already gone is fine, and a removal that
- * fails because Windows still holds a file of it (a child that just exited) is tried again.
- */
-export const REMOVE_FOLDER = { recursive: true, force: true, maxRetries: 5, retryDelay: 100 };
-
 /** Deletes an install folder with everything in it; a folder that is already gone is fine. */
 export function removePackages(dir: string): Promise<void> {
   return rm(dir, REMOVE_FOLDER);
+}
+
+function hashOf(specs: string[]): string {
+  return createHash('sha256').update(specs.join('\n')).digest('hex');
+}
+
+/** Copies `<root>/.npmrc` into `dir`; nothing to do when the project has none. */
+async function copyNpmrc(root: string, dir: string): Promise<void> {
+  await TryAsync.runAsync(() =>
+    copyFile(path.join(root, '.npmrc'), path.join(dir, '.npmrc')),
+  ).onFail((error) => {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+  });
 }
 
 /** The text of a package list, without a byte order mark. */
@@ -107,7 +135,18 @@ function parseList(text: string, base: string): Either<string, string[]> {
     .toEither()
     .mapLeft((error) => `invalid JSON (${(error as Error).message})`)
     .bind((data) => firstProblem(specsOf(data)))
-    .map((specs) => specs.map((spec) => (isLocalPath(spec) ? path.resolve(base, spec) : spec)));
+    .map((specs) => specs.map((spec) => absoluteSpec(spec, base)));
+}
+
+/**
+ * A local path or a `file:` spec made absolute against `base` (a `file:` spec keeps its prefix),
+ * else the spec as it is. npm would resolve them against the install folder.
+ */
+function absoluteSpec(spec: string, base: string): string {
+  if (spec.startsWith(FILE_PREFIX)) {
+    return `${FILE_PREFIX}${path.resolve(base, spec.slice(FILE_PREFIX.length))}`;
+  }
+  return isLocalPath(spec) ? path.resolve(base, spec) : spec;
 }
 
 function specsOf(data: unknown): Checked<string[]> {

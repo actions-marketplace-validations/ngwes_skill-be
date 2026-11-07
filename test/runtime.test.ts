@@ -337,6 +337,22 @@ describe('prepareCodeTests', () => {
     expect(existsSync(install)).toBe(false);
   });
 
+  it('removes the folder of an install that fails', async () => {
+    const list = await localPackage();
+    await put('skill-tests/sum/adds.test.ts', `${IMPORT_TEST}test('one', () => {});\n`);
+    const failing: Runner = async (opts) => {
+      // npm got as far as writing into the folder before it failed.
+      await mkdir(path.join(opts.cwd!, 'node_modules', 'half'), { recursive: true });
+      return { stdout: '', stderr: 'npm error network', code: 1, timedOut: false };
+    };
+    const preparing = prepare([await makeSuite('sum', [contractScenario('adds')], list)], {
+      run: failing,
+    });
+    await expect(preparing).rejects.toThrow(ConfigError);
+    await expect(preparing).rejects.toThrow('npm error network');
+    expect(await readdir(depsRoot())).toEqual([]);
+  });
+
   it('passes judge-only suites through without installing anything', async () => {
     const suite = await makeSuite('judged', [judgeScenario('s1')]);
     const npm = fakeNpm();

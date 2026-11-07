@@ -13,7 +13,13 @@ import { loadTypescript, type TypeScript, type TypescriptDeps } from '../checks/
 import { ConfigError, type Config, type Scenario, type SkillSuite } from '../types.js';
 import { extractAnswer, transpile } from './compile.js';
 import { executeTests, listTests, type TestOutcome } from './execute.js';
-import { REMOVE_FOLDER, installPackages, readPackageList, removePackages } from './packages.js';
+import {
+  REMOVE_FOLDER,
+  installFolder,
+  installPackages,
+  readPackageList,
+  removePackages,
+} from './packages.js';
 
 export type CodeTestResult = { outcomes: TestOutcome[]; infraError: string | null };
 
@@ -212,7 +218,7 @@ function hasContracts(suite: SkillSuite): boolean {
  * Reads each distinct package list and installs each distinct set of specs once, in order: the
  * installs are not locked against each other. A suite without a list installs the empty one, so
  * its answers still run in a folder whose `package.json` makes them ES modules. Every folder is
- * added to `installDirs` as soon as it is installed.
+ * added to `installDirs` before its install starts.
  *
  * @returns skill name -> its install folder.
  */
@@ -231,8 +237,9 @@ async function installLists(
     const specs = specsByList.get(list)!;
     const key = JSON.stringify(specs);
     if (!dirsBySpecs.has(key)) {
+      // Known before npm starts, so that an install that fails half way is removed too.
+      installDirs.add(installFolder(specs, config.root));
       const { dir, reused } = await installPackages(specs, config.root, opts.run);
-      installDirs.add(dir);
       dirsBySpecs.set(key, dir);
       if (specs.length > 0) {
         opts.log(

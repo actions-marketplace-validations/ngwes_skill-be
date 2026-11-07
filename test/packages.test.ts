@@ -5,7 +5,12 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { Runner } from '../src/adapters/common.js';
-import { installPackages, readPackageList, removePackages } from '../src/code-tests/packages.js';
+import {
+  installFolder,
+  installPackages,
+  readPackageList,
+  removePackages,
+} from '../src/code-tests/packages.js';
 import { runProcess, type ProcessOptions, type ProcessResult } from '../src/process.js';
 import { ConfigError } from '../src/types.js';
 
@@ -85,6 +90,18 @@ describe('readPackageList', () => {
     const absolute = path.join(os.tmpdir(), 'elsewhere', 'pkg');
     const file = await listFile({ npm: [absolute] });
     expect(await readPackageList(file)).toEqual([absolute]);
+  });
+
+  it('resolves a file: spec against the folder of the list, keeping the prefix', async () => {
+    const absolute = path.join(os.tmpdir(), 'elsewhere', 'pkg');
+    const file = await listFile({
+      npm: ['file:../lib', 'file:./libs/pkg.tgz', `file:${absolute}`],
+    });
+    expect(await readPackageList(file)).toEqual([
+      `file:${path.resolve(root, '../lib')}`,
+      `file:${path.join(root, 'libs', 'pkg.tgz')}`,
+      `file:${absolute}`,
+    ]);
   });
 
   it.skipIf(process.platform !== 'win32')('treats a drive letter as a local path', async () => {
@@ -190,6 +207,47 @@ describe('installPackages', () => {
     expect((await installPackages(specs, root, run)).reused).toBe(false);
     expect(calls).toHaveLength(2);
     expect(await readFile(path.join(dir, '.skill-be-installed'), 'utf8')).toBe(hashOf(specs));
+  });
+
+  it('removes what a folder without its marker holds before installing again', async () => {
+    const dir = depsFolder(hashOf(specs));
+    const leftover = path.join(dir, 'node_modules', 'half-installed', 'index.js');
+    await mkdir(path.dirname(leftover), { recursive: true });
+    await writeFile(leftover, '');
+    const seen: boolean[] = [];
+    const { run } = fakeRunner({}, () => seen.push(existsSync(leftover)));
+
+    expect(await installPackages(specs, root, run)).toEqual({ dir, reused: false });
+    expect(seen).toEqual([false]);
+    expect(existsSync(leftover)).toBe(false);
+  });
+
+  it("copies the project's .npmrc into the folder before npm runs", async () => {
+    const npmrc = 'registry=https://registry.example.com/\n';
+    await writeFile(path.join(root, '.npmrc'), npmrc);
+    const dir = depsFolder(hashOf(specs));
+    const seen: (string | null)[] = [];
+    const { run } = fakeRunner({}, (opts) => {
+      const copy = path.join(opts.cwd!, '.npmrc');
+      seen.push(existsSync(copy) ? readFileSync(copy, 'utf8') : null);
+    });
+
+    // The folder is the one of the specs alone: the .npmrc is not part of the hash.
+    expect(await installPackages(specs, root, run)).toEqual({ dir, reused: false });
+    expect(seen).toEqual([npmrc]);
+  });
+
+  it('runs npm without an .npmrc when the project has none', async () => {
+    const seen: boolean[] = [];
+    const { run } = fakeRunner({}, (opts) => {
+      seen.push(existsSync(path.join(opts.cwd!, '.npmrc')));
+    });
+    await installPackages(specs, root, run);
+    expect(seen).toEqual([false]);
+  });
+
+  it('names the folder it installs into before installing', () => {
+    expect(installFolder(specs, root)).toBe(depsFolder(hashOf(specs)));
   });
 
   it("reports a failed install with npm's output", async () => {
