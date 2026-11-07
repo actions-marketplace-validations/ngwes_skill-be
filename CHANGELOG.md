@@ -1,3 +1,10 @@
+# [1.5.0](https://github.com/ngwes/skill-be/compare/v1.4.1...v1.5.0) (2026-11-07)
+
+
+### Features
+
+* restyle the html report after the skill-be style guide ([0102394](https://github.com/ngwes/skill-be/commit/01023944aea425808cc77ba2e6a43adb2acedb8d))
+
 ## [1.4.1](https://github.com/ngwes/skill-be/compare/v1.4.0...v1.4.1) (2026-11-07)
 
 
