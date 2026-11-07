@@ -236,6 +236,54 @@ describe('renderReport', () => {
     );
   });
 
+  describe('the Grading part of the Method line', () => {
+    const GRADED = 'Grading: majority of 3 claude-haiku-5-5 calls per output (via claude-cli).';
+    const testOnly = scenarioResult(
+      {
+        id: 'signup',
+        criteria: [],
+        tests: ['responds 201'],
+        output: { signup: 'Handles a signup request' },
+      },
+      [model('claude-sonnet-5-5', [[33, 100]]), model('gpt-x', [[0, 67]])],
+    );
+
+    it('says nothing was graded when no scenario has criteria', () => {
+      const report = renderReport(run([testOnly]), READY_GATE, METHOD);
+      expect(report).toContain(
+        'Method: automated eval. Models: claude-cli:claude-sonnet-5-5, pi-cli:gpt-x. Reps: 3. ' +
+          'Grading: none, no scenario has criteria (code tests only).\n',
+      );
+      expect(report).not.toContain('majority of');
+      expect(report).not.toContain('claude-haiku-5-5');
+    });
+
+    it('says nothing was graded when every scenario of the skill has only code tests', () => {
+      const other = scenarioResult({ id: 'login', criteria: [], tests: ['responds 200'] }, [
+        model('claude-sonnet-5-5', [[0, 100]]),
+        model('gpt-x', [[0, 100]]),
+      ]);
+      const report = renderReport(run([testOnly, other]), READY_GATE, METHOD);
+      expect(report).toContain('Grading: none, no scenario has criteria (code tests only).');
+    });
+
+    it('keeps the grading text when a scenario has criteria', () => {
+      const report = renderReport(fixture(), READY_GATE, METHOD);
+      expect(report).toContain(`Reps: 3. ${GRADED}\n`);
+      expect(report).not.toContain('Grading: none');
+    });
+
+    it('keeps the grading text when one scenario has criteria and another has only tests', () => {
+      const judged = scenarioResult({ id: 'style', criteria: ['Uses Option'] }, [
+        model('claude-sonnet-5-5', [[0, 100]]),
+        model('gpt-x', [[0, 100]]),
+      ]);
+      const report = renderReport(run([testOnly, judged]), READY_GATE, METHOD);
+      expect(report).toContain(`Reps: 3. ${GRADED}\n`);
+      expect(report).not.toContain('Grading: none');
+    });
+  });
+
   it('keeps a pipe or a line break in a criterion inside its table cell', () => {
     const report = renderReport(
       run([

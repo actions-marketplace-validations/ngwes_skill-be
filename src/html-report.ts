@@ -6,7 +6,7 @@
 
 import { Option } from '@ngwes/mini-fp';
 import { fmtDelta, type GateBlock, type GateVerdict } from './gate.js';
-import type { ReportMethod } from './report.js';
+import { isGraded, NOT_GRADED, type ReportMethod } from './report.js';
 import type { ArmOutput, CriterionScore, ModelResult, SkillRun } from './runner.js';
 import { scoredLines } from './scored-lines.js';
 import type { AdapterSettings } from './types.js';
@@ -242,7 +242,10 @@ export function renderHtml(
     : `<strong>NOT READY</strong> <span>${blocking} of ${runs.length} skill(s) block</span>`;
   const meta =
     `Models: ${method.models.map(adapterLabel).join(', ')} · ` +
-    `Grader: ${adapterLabel(method.grader)} · Reps: ${method.reps} · Gradings: ${method.gradings}`;
+    (isGraded(runs)
+      ? `Grader: ${adapterLabel(method.grader)} · Reps: ${method.reps} · ` +
+        `Gradings: ${method.gradings}`
+      : `Grader: ${NOT_GRADED} · Reps: ${method.reps}`);
 
   const rows = runs.map((run) => {
     const gate = gateOf(gates, run.skill);

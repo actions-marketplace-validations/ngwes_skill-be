@@ -1129,7 +1129,7 @@ Add `.skill-be/` to your `.gitignore`: the results directory is for inspection, 
 
 `skill-be run --html` also writes `results.html`, the run as a page to open in a browser. It holds what `summary.json` holds, plus every answer:
 
-- a banner with the verdict of the run, how many skills block, the date, the models and the grader;
+- a banner with the verdict of the run, how many skills block, the date, the models and the grader (or that nothing was graded, when no scenario has criteria);
 - an overview table: each skill's verdict, errors, duration and why it blocks, linked to its section;
 - a section per skill, open when the skill blocks: the gate reasons, then each scenario with its prompt, its scores per model and the grader's notes, and, folded, every rep's answer from both arms with the grader replies and, for code tests, the result and failure message of each test.
 
@@ -1428,7 +1428,7 @@ How it works:
 
 The tests never reach the model: nothing from the tests folder goes into a prompt that produces an answer to score, in a benchmark run or in triage's fresh samples.
 
-Choose by what you want to know. Use criteria for what only a reader can see: which API the code uses, a naming rule, "never logs the password". Use tests for what the code does when it is called: the value it returns, the status it answers, the calls it makes. A criterion can pass code that does not work; a test cannot. A test can fail correct code that reaches the right result another way, so assert what the task asks for and nothing more. Put both on one scenario when both matter: the judge and the tests get the same answer. A scenario with tests and no criteria makes no grader call.
+Choose by what you want to know. Use criteria for what only a reader can see: which API the code uses, a naming rule, "never logs the password". Use tests for what the code does when it is called: the value it returns, the status it answers, the calls it makes. A criterion can pass code that does not work; a test cannot. A test can fail correct code that reaches the right result another way, so assert what the task asks for and nothing more. Put both on one scenario when both matter: the judge and the tests get the same answer. A scenario with tests and no criteria makes no grader call. When no scenario of a skill has criteria, its report says `Grading: none, no scenario has criteria (code tests only).` instead of naming the grader. The [HTML page](#the-html-page) does the same when no scenario of the run has criteria.
 
 ### Example: a signup handler
 

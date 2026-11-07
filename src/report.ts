@@ -24,6 +24,17 @@ export type ReportMethod = {
   date: string;
 };
 
+/** What the `Grading:` part of the method says when no scenario has criteria. */
+export const NOT_GRADED = 'none, no scenario has criteria (code tests only)';
+
+/**
+ * Whether the grader is called in these runs: some scenario has judge criteria. A scenario with
+ * only code tests makes no grader call, so a run where none has criteria grades nothing.
+ */
+export function isGraded(runs: readonly SkillRun[]): boolean {
+  return runs.some((run) => run.scenarios.some(({ scenario }) => scenario.criteria.length > 0));
+}
+
 const NOTE_LINE =
   'Note: "with skill" puts the SKILL.md content in the user prompt.';
 
@@ -53,8 +64,10 @@ export function renderReport(
     `Method: automated eval. ` +
       `Models: ${method.models.map((model) => `${model.adapter}:${model.id}`).join(', ')}. ` +
       `Reps: ${method.reps}. ` +
-      `Grading: majority of ${method.gradings} ${method.grader.id} calls per output ` +
-      `(via ${method.grader.adapter}).`,
+      (isGraded([run])
+        ? `Grading: majority of ${method.gradings} ${method.grader.id} calls per output ` +
+          `(via ${method.grader.adapter}).`
+        : `Grading: ${NOT_GRADED}.`),
   );
   out.push(NOTE_LINE);
   out.push('');

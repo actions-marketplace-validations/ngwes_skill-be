@@ -122,6 +122,70 @@ describe('renderHtml', () => {
     );
   });
 
+  describe('the grader part of the method', () => {
+    const GRADED = 'Grader: claude-cli:claude-haiku-5-5 · Reps: 1 · Gradings: 1';
+    const NOT_GRADED = 'Grader: none, no scenario has criteria (code tests only) · Reps: 1';
+
+    /** A skill whose scenarios are given as `[criteria, tests]` pairs. */
+    const skillOf = (skill: string, scenarios: [string[], string[]][]): SkillRun => ({
+      skill,
+      errorCount: 0,
+      startedAt: '2026-11-02T09:00:00.000Z',
+      durationMs: 1_000,
+      scenarios: scenarios.map(([criteria, tests], i) => ({
+        scenario: {
+          id: `${skill}-${i}`,
+          critical: false,
+          prompt: 'Do it.',
+          criteria,
+          output: tests.length > 0 ? { handler: 'The handler' } : null,
+          tests,
+        },
+        models: [model([...criteria, ...tests].map((): [number, number] => [0, 100]), [])],
+      })),
+    });
+
+    const gatesOf = (runs: SkillRun[]) =>
+      new Map<string, GateVerdict>(
+        runs.map((run) => [run.skill, { ready: true, reasons: [], blocks: [] }]),
+      );
+
+    const header = (runs: SkillRun[]): string => text(renderHtml(runs, gatesOf(runs), METHOD));
+
+    it('says nothing was graded when no scenario of the run has criteria', () => {
+      const runs = [
+        skillOf('signup', [[[], ['responds 201']]]),
+        skillOf('login', [[[], ['responds 200']], [[], ['rejects a bad password']]]),
+      ];
+      expect(header(runs)).toContain(
+        `Models: claude-cli:claude-sonnet-5-5 · ${NOT_GRADED}`,
+      );
+      expect(header(runs)).not.toContain('claude-haiku-5-5');
+      expect(header(runs)).not.toContain('Gradings:');
+    });
+
+    it('keeps the grading text when a scenario of the run has criteria', () => {
+      const runs = [skillOf('signup', [[['Uses Option'], []]])];
+      expect(header(runs)).toContain(`Models: claude-cli:claude-sonnet-5-5 · ${GRADED}`);
+      expect(header(runs)).not.toContain('Grader: none');
+    });
+
+    it('keeps the grading text when one skill of the run is graded and another has only tests', () => {
+      const runs = [
+        skillOf('signup', [[[], ['responds 201']]]),
+        skillOf('either', [[['Uses Either'], []]]),
+      ];
+      expect(header(runs)).toContain(GRADED);
+      expect(header(runs)).not.toContain('Grader: none');
+    });
+
+    it('keeps the grading text when one scenario has criteria and another has only tests', () => {
+      const runs = [skillOf('signup', [[[], ['responds 201']], [['Uses Option'], []]])];
+      expect(header(runs)).toContain(GRADED);
+      expect(header(runs)).not.toContain('Grader: none');
+    });
+  });
+
   it('says READY when no skill blocks', () => {
     const ready = new Map(GATES).set('option', { ready: true, reasons: [], blocks: [] });
     expect(text(renderHtml(RUNS, ready, METHOD))).toContain('READY every skill passes the gate');
