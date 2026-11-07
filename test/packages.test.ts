@@ -3,6 +3,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { Runner } from '../src/adapters/common.js';
 import {
@@ -102,6 +103,13 @@ describe('readPackageList', () => {
       `file:${path.join(root, 'libs', 'pkg.tgz')}`,
       `file:${absolute}`,
     ]);
+  });
+
+  it('passes a file:// url through as it is, not as a path of the list folder', async () => {
+    const url = pathToFileURL(path.join(os.tmpdir(), 'elsewhere', 'pkg')).href;
+    expect(url.startsWith('file:///')).toBe(true);
+    const file = await listFile({ npm: [url, 'file:../lib'] });
+    expect(await readPackageList(file)).toEqual([url, `file:${path.resolve(root, '../lib')}`]);
   });
 
   it.skipIf(process.platform !== 'win32')('treats a drive letter as a local path', async () => {

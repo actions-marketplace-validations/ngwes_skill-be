@@ -36,11 +36,14 @@ export const REMOVE_FOLDER = { recursive: true, force: true, maxRetries: 5, retr
 /** The prefix of an npm spec that names a local folder or tarball by its path. */
 const FILE_PREFIX = 'file:';
 
+/** The prefix of a `file:` spec that is a URL (`file:///D:/libs/pkg`), not a path. */
+const FILE_URL_PREFIX = 'file://';
+
 /**
  * The npm specs of a package list: a JSON file `{ "npm": [ ...specs ] }`. A spec that is a local
  * path (it starts with `.` or `/`, or with a drive letter) is made absolute against the folder of
  * the list, and so is the path of a `file:` spec, which keeps its prefix (`file:../lib` becomes
- * `file:/abs/lib`); every other spec is returned as written.
+ * `file:/abs/lib`); every other spec is returned as written, a `file://` URL included.
  *
  * @throws ConfigError when the file is missing, unreadable or not a package list, or when it has
  * a section for a language other than npm.
@@ -139,10 +142,13 @@ function parseList(text: string, base: string): Either<string, string[]> {
 }
 
 /**
- * A local path or a `file:` spec made absolute against `base` (a `file:` spec keeps its prefix),
- * else the spec as it is. npm would resolve them against the install folder.
+ * A local path or a `file:` path spec made absolute against `base` (a `file:` spec keeps its
+ * prefix), else the spec as it is. npm would resolve the paths against the install folder. A
+ * `file://` URL is already absolute and is left alone: read as a path, `file:///D:/libs/pkg`
+ * would become a nonsense path on Windows.
  */
 function absoluteSpec(spec: string, base: string): string {
+  if (spec.startsWith(FILE_URL_PREFIX)) return spec;
   if (spec.startsWith(FILE_PREFIX)) {
     return `${FILE_PREFIX}${path.resolve(base, spec.slice(FILE_PREFIX.length))}`;
   }
