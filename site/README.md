@@ -31,6 +31,24 @@ links, so the sync script generates links that include the `base` (see `site.mjs
 The site has its own `package.json` and is not part of the published package: the root `npm ci`, `npm test` and
 `npm run build` do not touch it.
 
+## Theme
+
+The look follows the skill-be style guide (CRT terminal, crisp pixels, restrained neon), in a dark and a light theme:
+
+- `src/styles/skill-be.css` sets Starlight's colour and font variables, the stepped corners of the frames and the
+  header. Phosphor green is the identity and the structure, amber a small accent, and one muted red is kept for
+  blocking states; cyan and magenta are left out, since they mean baseline and with skill in skill-be's reports.
+  Every text colour reaches WCAG AA in both themes.
+- `ec.config.mjs` and `src/code-themes.mjs` theme the code blocks (Expressive Code).
+- `src/assets/skill-be-icon.png` is the header icon: `public/favicon.png` reduced to 40x40 and drawn with square
+  pixels.
+
+The fonts are self-hosted from npm packages, with no request to Google Fonts: IBM Plex Mono
+([@fontsource/ibm-plex-mono](https://www.npmjs.com/package/@fontsource/ibm-plex-mono), © IBM Corp.) for the text and
+the code, Press Start 2P ([@fontsource/press-start-2p](https://www.npmjs.com/package/@fontsource/press-start-2p),
+© The Press Start 2P Project Authors) for the title, the short headings and labels. Both are under the SIL Open Font
+License 1.1; their license texts are in `public/fonts/` and published with the site.
+
 ## Deployment
 
 `.github/workflows/deploy-docs.yml` builds the site for every pull request and deploys it on every push to `main` that

@@ -1,4 +1,4 @@
-import { readdir, readFile } from 'node:fs/promises';
+import { readdir, readFile, stat } from 'node:fs/promises';
 import path from 'node:path';
 import {
   Either,
@@ -10,6 +10,7 @@ import {
   traverseEither,
 } from '@ngwes/mini-fp';
 import { all, check, fail, firstProblem, pass, valueOrThrow, type Checked } from './checked.js';
+import { discoverTests } from './code-tests/discover.js';
 import { ConfigError, type Config, type Scenario, type SkillSuite } from './types.js';
 
 type Skill = { name: string; skillPath: string; skillText: string };
@@ -29,13 +30,81 @@ export async function loadSuites(config: Config, only?: string[]): Promise<Loade
     { suites: [], warnings: [] },
     async ({ suites, warnings }, skill) => {
       const evalPath = path.join(config.evals, `${skill.name}.json`);
-      return (await readIfPresent(evalPath)).match<Loaded>(
-        (evalText) => ({
-          suites: [...suites, { ...skill, evalPath, scenarios: scenariosOf(evalText, evalPath) }],
-          warnings,
-        }),
+      return (await readIfPresent(evalPath)).matchAsync<Loaded>(
+        async (evalText) => {
+          const scenarios = scenariosOf(evalText, evalPath);
+          const code = await codeTestsOf(config, skill.name, scenarios);
+          return { suites: [...suites, { ...skill, evalPath, scenarios, ...code }], warnings };
+        },
         () => ({ suites, warnings: [...warnings, `skill "${skill.name}" has no eval file`] }),
       );
+    },
+  );
+}
+
+type CodeTests = Pick<SkillSuite, 'testFiles' | 'codeFiles' | 'packageList'>;
+
+const NO_CODE_TESTS: CodeTests = { testFiles: {}, codeFiles: [], packageList: null };
+const DEFAULT_PACKAGE_LIST = 'test-packages.json';
+
+/**
+ * The code tests of a skill. A skill without an `output` contract has none, but its test folder is
+ * still read, so that a test file for a scenario that lacks a contract is reported. A skill with
+ * one needs the `tests` folder of the config and a test file per contract.
+ */
+async function codeTestsOf(
+  config: Config,
+  skill: string,
+  scenarios: Scenario[],
+): Promise<CodeTests> {
+  const { tests } = config.codeTests;
+  const contracted = scenarios.find((scenario) => scenario.output !== null);
+
+  if (tests === null) {
+    if (contracted === undefined) return NO_CODE_TESTS;
+    throw new ConfigError(
+      `scenario "${contracted.id}" of skill "${skill}" has an "output" contract but "tests" is ` +
+        'not set in the config',
+    );
+  }
+
+  const found = await discoverTests(tests, skill, scenarios);
+  if (contracted === undefined) return NO_CODE_TESTS;
+  return { ...found, packageList: await packageListOf(config, skill) };
+}
+
+/**
+ * The package list of a skill with output contracts: the one set for the skill, else the one set
+ * for all skills, else `test-packages.json` in the config folder when there is one, else none. A
+ * list the config names must exist.
+ */
+async function packageListOf(config: Config, skill: string): Promise<string | null> {
+  const { packages, packagesBySkill } = config.codeTests;
+  const own = Object.prototype.hasOwnProperty.call(packagesBySkill, skill)
+    ? packagesBySkill[skill]
+    : undefined;
+
+  return Option.from(own ?? packages).matchAsync<string | null>(
+    async (named) => {
+      if (await isFile(named)) return named;
+      throw new ConfigError(
+        `${named}: the package list does not exist (needed by skill "${skill}")`,
+      );
+    },
+    async () => {
+      const fallback = path.join(config.root, DEFAULT_PACKAGE_LIST);
+      return (await isFile(fallback)) ? fallback : null;
+    },
+  );
+}
+
+function isFile(file: string): Promise<boolean> {
+  return TryAsync.runAsync(() => stat(file)).match<boolean>(
+    (info) => info.isFile(),
+    (error) => {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === 'ENOENT' || code === 'ENOTDIR') return false;
+      throw new ConfigError(`cannot read ${file} (${(error as Error).message})`);
     },
   );
 }
@@ -120,14 +189,14 @@ function scenarioList(data: Option<unknown>): Checked<Scenario[]> {
 function parseScenario(raw: unknown, index: number): Checked<Scenario> {
   if (!isRecord(raw)) return fail(`"scenarios[${index}]" must be an object`);
 
-  const { id, critical, prompt, criteria } = raw;
+  const { id, critical, prompt, criteria, output } = raw;
   return check(
     isNonEmptyString(id),
     id as string,
     () => `scenarios[${index}]: "id" must be a non-empty string`,
   ).bind((id) => {
     const where = `scenario "${id}"`;
-    return all<Scenario>({
+    return all<Parsed>({
       id: pass(id),
       critical: check(
         critical === undefined || typeof critical === 'boolean',
@@ -139,13 +208,77 @@ function parseScenario(raw: unknown, index: number): Checked<Scenario> {
         prompt as string,
         () => `${where}: "prompt" must be a non-empty string`,
       ),
-      criteria: check(
-        Array.isArray(criteria) && criteria.length > 0 && criteria.every(isNonEmptyString),
-        criteria as string[],
-        () => `${where}: "criteria" must be a non-empty list of non-empty strings`,
-      ).map((list) => [...list]),
-    });
+      criteria:
+        criteria === undefined
+          ? pass<string[]>([])
+          : check(
+              Array.isArray(criteria) && criteria.length > 0 && criteria.every(isNonEmptyString),
+              criteria as string[],
+              () => `${where}: "criteria" must be a non-empty list of non-empty strings`,
+            ).map((list) => [...list]),
+      output: parseOutput(output, where),
+      tests: pass<string[]>([]),
+    })
+      .bind((scenario) =>
+        check(
+          scenario.criteria.length > 0 || scenario.output.isSome(),
+          scenario,
+          () => `${where}: needs "criteria", an "output" contract, or both`,
+        ),
+      )
+      .map((scenario) => ({
+        ...scenario,
+        output: scenario.output.match<Record<string, string> | null>(
+          (contract) => contract,
+          () => null,
+        ),
+      }));
   });
+}
+
+/** A scenario as it is checked: a `Validate` cannot hold `null`, so no `output` is a `none`. */
+type Parsed = Omit<Scenario, 'output'> & { output: Option<Record<string, string>> };
+
+const FIELD_NAME = /^[A-Za-z_$][\w$]*$/;
+const MAX_DESCRIPTION_LENGTH = 200;
+
+/**
+ * The `output` contract of a scenario: a mapping of field names (JavaScript identifiers) to their
+ * descriptions (non-empty, at most 200 characters), in the eval file's order, with a `result`
+ * field. `none` when the scenario declares no contract.
+ */
+function parseOutput(output: unknown, where: string): Checked<Option<Record<string, string>>> {
+  if (output === undefined) return pass(Option.none<Record<string, string>>());
+  if (!isRecord(output)) {
+    return fail(`${where}: "output" must be a mapping of field names to descriptions`);
+  }
+
+  const fields = Object.entries(output).map(([name, description]) =>
+    all<{ name: string; description: string }>({
+      name: check(
+        FIELD_NAME.test(name),
+        name,
+        () => `${where}: "output.${name}" must be a JavaScript identifier`,
+      ),
+      description: check(
+        isNonEmptyString(description) && description.length <= MAX_DESCRIPTION_LENGTH,
+        description as string,
+        () =>
+          `${where}: "output.${name}" must be a non-empty string of at most ` +
+          `${MAX_DESCRIPTION_LENGTH} characters`,
+      ),
+    }).map((field) => [field.name, field.description] as const),
+  );
+
+  return sequenceValidate(fields)
+    .map((entries) => Object.fromEntries(entries))
+    .bind((contract) =>
+      check(
+        'result' in contract,
+        Option.some(contract),
+        () => `${where}: "output" must have a "result" field`,
+      ),
+    );
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

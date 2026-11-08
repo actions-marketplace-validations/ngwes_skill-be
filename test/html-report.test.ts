@@ -9,8 +9,8 @@ const HAIKU: AdapterSettings = { adapter: 'claude-cli', id: 'claude-haiku-5-5' }
 const METHOD = { models: [SONNET], grader: HAIKU, reps: 1, gradings: 1, date: '2026-11-02' };
 
 const rep = (baseline: string, withSkill: string): RepOutputs => ({
-  baseline: { output: baseline, gradings: [`graded ${baseline}`] },
-  'with-skill': { output: withSkill, gradings: [`graded ${withSkill}`] },
+  baseline: { output: baseline, gradings: [`graded ${baseline}`], tests: [] },
+  'with-skill': { output: withSkill, gradings: [`graded ${withSkill}`], tests: [] },
 });
 
 const model = (scores: [number, number][], outputs: RepOutputs[], notes: string[] = []) =>
@@ -31,7 +31,14 @@ const RUNS: SkillRun[] = [
     durationMs: 252_000,
     scenarios: [
       {
-        scenario: { id: 'parse-config', critical: false, prompt: 'Parse it.', criteria: ['Uses Either'] },
+        scenario: {
+          id: 'parse-config',
+          critical: false,
+          prompt: 'Parse it.',
+          criteria: ['Uses Either'],
+          output: null,
+          tests: [],
+        },
         models: [model([[0, 100]], [rep('either base answer', 'either skill answer')])],
       },
     ],
@@ -48,6 +55,8 @@ const RUNS: SkillRun[] = [
           critical: true,
           prompt: 'Pick the theme.',
           criteria: ['Falls back inside the chain', 'Uses Option.from'],
+          output: null,
+          tests: [],
         },
         models: [
           model(
@@ -113,6 +122,70 @@ describe('renderHtml', () => {
     );
   });
 
+  describe('the grader part of the method', () => {
+    const GRADED = 'Grader: claude-cli:claude-haiku-5-5 · Reps: 1 · Gradings: 1';
+    const NOT_GRADED = 'Grader: none, no scenario has criteria (code tests only) · Reps: 1';
+
+    /** A skill whose scenarios are given as `[criteria, tests]` pairs. */
+    const skillOf = (skill: string, scenarios: [string[], string[]][]): SkillRun => ({
+      skill,
+      errorCount: 0,
+      startedAt: '2026-11-02T09:00:00.000Z',
+      durationMs: 1_000,
+      scenarios: scenarios.map(([criteria, tests], i) => ({
+        scenario: {
+          id: `${skill}-${i}`,
+          critical: false,
+          prompt: 'Do it.',
+          criteria,
+          output: tests.length > 0 ? { handler: 'The handler' } : null,
+          tests,
+        },
+        models: [model([...criteria, ...tests].map((): [number, number] => [0, 100]), [])],
+      })),
+    });
+
+    const gatesOf = (runs: SkillRun[]) =>
+      new Map<string, GateVerdict>(
+        runs.map((run) => [run.skill, { ready: true, reasons: [], blocks: [] }]),
+      );
+
+    const header = (runs: SkillRun[]): string => text(renderHtml(runs, gatesOf(runs), METHOD));
+
+    it('says nothing was graded when no scenario of the run has criteria', () => {
+      const runs = [
+        skillOf('signup', [[[], ['responds 201']]]),
+        skillOf('login', [[[], ['responds 200']], [[], ['rejects a bad password']]]),
+      ];
+      expect(header(runs)).toContain(
+        `Models: claude-cli:claude-sonnet-5-5 · ${NOT_GRADED}`,
+      );
+      expect(header(runs)).not.toContain('claude-haiku-5-5');
+      expect(header(runs)).not.toContain('Gradings:');
+    });
+
+    it('keeps the grading text when a scenario of the run has criteria', () => {
+      const runs = [skillOf('signup', [[['Uses Option'], []]])];
+      expect(header(runs)).toContain(`Models: claude-cli:claude-sonnet-5-5 · ${GRADED}`);
+      expect(header(runs)).not.toContain('Grader: none');
+    });
+
+    it('keeps the grading text when one skill of the run is graded and another has only tests', () => {
+      const runs = [
+        skillOf('signup', [[[], ['responds 201']]]),
+        skillOf('either', [[['Uses Either'], []]]),
+      ];
+      expect(header(runs)).toContain(GRADED);
+      expect(header(runs)).not.toContain('Grader: none');
+    });
+
+    it('keeps the grading text when one scenario has criteria and another has only tests', () => {
+      const runs = [skillOf('signup', [[[], ['responds 201']], [['Uses Option'], []]])];
+      expect(header(runs)).toContain(GRADED);
+      expect(header(runs)).not.toContain('Grader: none');
+    });
+  });
+
   it('says READY when no skill blocks', () => {
     const ready = new Map(GATES).set('option', { ready: true, reasons: [], blocks: [] });
     expect(text(renderHtml(RUNS, ready, METHOD))).toContain('READY every skill passes the gate');
@@ -167,7 +240,14 @@ describe('renderHtml', () => {
         skill: 'a<b>',
         scenarios: [
           {
-            scenario: { id: 'i<d>', critical: false, prompt: hostile, criteria: [hostile] },
+            scenario: {
+              id: 'i<d>',
+              critical: false,
+              prompt: hostile,
+              criteria: [hostile],
+              output: null,
+              tests: [],
+            },
             models: [model([[0, 100]], [rep(hostile, hostile)], [hostile])],
           },
         ],
@@ -183,7 +263,138 @@ describe('renderHtml', () => {
     expect(page).toContain('href="#skill-a%3Cb%3E"');
   });
 
+  it("shows each arm's test results with failure messages, escaped", () => {
+    const runs: SkillRun[] = [
+      {
+        ...RUNS[0]!,
+        scenarios: [
+          {
+            scenario: {
+              id: 'create-user',
+              critical: false,
+              prompt: 'Create a user.',
+              criteria: [],
+              output: { result: 'the handler' },
+              tests: ['responds 201', 'rejects <b>'],
+            },
+            models: [
+              model(
+                [
+                  [0, 100],
+                  [0, 50],
+                ],
+                [
+                  {
+                    baseline: {
+                      output: 'base code',
+                      gradings: [],
+                      tests: [
+                        { name: 'responds 201', pass: false, message: 'expected 201, got <500>' },
+                        { name: 'rejects <b>', pass: false, message: 'no code block' },
+                      ],
+                    },
+                    'with-skill': {
+                      output: 'skill code',
+                      gradings: [],
+                      tests: [
+                        { name: 'responds 201', pass: true, message: '' },
+                        { name: 'rejects <b>', pass: true, message: '' },
+                      ],
+                    },
+                  },
+                ],
+              ),
+            ],
+          },
+        ],
+      },
+    ];
+
+    const page = section(renderHtml(runs, GATES, METHOD), 'either');
+
+    expect(page).not.toContain('<b>');
+    expect(page).toContain(
+      '<h6>Tests</h6><ul class="notes"><li class="error">✗ responds 201 — expected 201, got ' +
+        '&lt;500&gt;</li><li class="error">✗ rejects &lt;b&gt; — no code block</li></ul>',
+    );
+    expect(page).toContain(
+      '<h6>Tests</h6><ul class="notes"><li class="note">✓ responds 201</li>' +
+        '<li class="note">✓ rejects &lt;b&gt;</li></ul>',
+    );
+    expect(text(page)).toContain('[test] responds 201 0% 100% +100pp');
+    expect(text(page)).toContain('[test] rejects <b> 0% 50% +50pp');
+    // Only the judge's replies are missing, and the tests say what was checked.
+    expect(page).not.toContain('Not graded.');
+  });
+
+  it('shows no test list for a judge-only scenario', () => {
+    expect(html).not.toContain('<h6>Tests</h6>');
+  });
+
   it('follows the light or dark setting of the system', () => {
     expect(html).toContain('@media (prefers-color-scheme: dark)');
+  });
+
+  describe('the look', () => {
+    const css = /<style>([\s\S]*?)<\/style>/.exec(html)?.[1] ?? '';
+
+    /** The `@font-face` rules of the page, each as its text. */
+    const fontFaces = css.match(/@font-face\s*\{[^}]*\}/g) ?? [];
+
+    /** The font a face rule embeds, decoded from its data URL. */
+    const embedded = (face: string): Buffer => {
+      const data = /url\("data:font\/woff2;base64,([A-Za-z0-9+/=]+)"\)/.exec(face);
+      expect(data, `no woff2 data URL in ${face.slice(0, 80)}`).not.toBeNull();
+      return Buffer.from(data![1]!, 'base64');
+    };
+
+    it.each([
+      ['Press Start 2P', '400'],
+      ['IBM Plex Mono', '400'],
+      ['IBM Plex Mono', '600'],
+    ])('embeds %s %s as a woff2 data URL', (family, weight) => {
+      const face = fontFaces.find(
+        (rule) =>
+          rule.includes(`font-family: "${family}"`) && rule.includes(`font-weight: ${weight};`),
+      );
+      expect(face, `no @font-face for ${family} ${weight}`).toBeDefined();
+      // Every woff2 file starts with this signature.
+      expect(embedded(face!).subarray(0, 4).toString('latin1')).toBe('wOF2');
+    });
+
+    it('loads nothing from the network, even from its CSS', () => {
+      expect(css).not.toMatch(/https?:/i);
+      expect(css).not.toMatch(/@import/i);
+      for (const url of css.match(/url\(([^)]*)\)/g) ?? []) {
+        expect(url.startsWith('url("data:')).toBe(true);
+      }
+    });
+
+    it('colours the baseline and the with-skill arm, in the scores and in the answers', () => {
+      const option = section(html, 'option');
+      expect(option).toContain(
+        '<th class="num baseline">Baseline</th><th class="num with-skill">With skill</th>',
+      );
+      expect(option).toContain('<div class="arm baseline"><h6>Baseline</h6>');
+      expect(option).toContain('<div class="arm with-skill"><h6>With skill</h6>');
+      expect(css).toMatch(/\.baseline\b[^{]*\{[^}]*var\(--baseline\)/);
+      expect(css).toMatch(/\.with-skill\b[^{]*\{[^}]*var\(--with-skill\)/);
+    });
+
+    it('defines a light theme and a dark one', () => {
+      const light = /:root\s*\{[^}]*\}/.exec(css)?.[0] ?? '';
+      const dark = /@media \(prefers-color-scheme: dark\)\s*\{\s*:root\s*\{[^}]*\}/.exec(css)?.[0];
+      expect(light).toContain('--bg: #F5EFE1');
+      expect(dark).toContain('--bg: #0B1A14');
+      for (const token of ['--fg', '--baseline', '--with-skill', '--ready', '--blocked']) {
+        expect(light).toContain(`${token}:`);
+        expect(dark).toContain(`${token}:`);
+      }
+    });
+
+    it('rounds no corner: frames step instead', () => {
+      expect(css).not.toMatch(/border-radius/);
+      expect(css).toContain('clip-path');
+    });
   });
 });

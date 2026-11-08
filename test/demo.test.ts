@@ -5,15 +5,20 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { main } from '../src/cli.js';
+import { armPrompts } from '../src/code-tests/contract.js';
+import { prepareCodeTests } from '../src/code-tests/runtime.js';
 import { loadConfig } from '../src/config.js';
+import { loadSuites } from '../src/suite.js';
 
-// The README's two examples must stay the projects in test/fixtures/demo and test/fixtures/no-code,
-// which must pass.
+// The README's examples must stay the projects in test/fixtures/demo, test/fixtures/no-code and
+// test/fixtures/signup, which must pass.
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const DEMO = path.join(ROOT, 'test', 'fixtures', 'demo');
 const SECTION = '## Example: test a skill end to end';
 const NO_CODE = path.join(ROOT, 'test', 'fixtures', 'no-code');
 const NO_CODE_SECTION = '## Example: test a skill without code';
+const SIGNUP = path.join(ROOT, 'test', 'fixtures', 'signup');
+const SIGNUP_SECTION = '## Code tests';
 const FENCE = '```';
 
 const lf = (text: string): string => text.replace(/\r\n/g, '\n');
@@ -160,4 +165,124 @@ describe('the README example without code', () => {
     expect(code).toBe(0);
     expect(readmeShows(stdout), 'the README shows this output').toBe(true);
   });
+});
+
+/** A reply that holds `code` as its one code block. */
+const reply = (code: string): string => `Here is the module:\n\n${FENCE}ts\n${code}\n${FENCE}\n`;
+
+/** An answer that follows the skill: its statuses, its bodies and nothing saved on bad input. */
+const FOLLOWS_THE_SKILL = `
+export const result = (deps) => async ({ email, password }) => {
+  if (!email.includes('@') || password.length < 12) {
+    return { status: 422, body: { errors: { password: 'at least 12 characters' } } };
+  }
+  if (await deps.isEmailTaken(email)) return { status: 409, body: { error: 'email-taken' } };
+  return { status: 201, body: await deps.createUser({ email, password }) };
+};
+export const reason = 'follows the conventions';
+`;
+
+/** An answer written without the skill: it saves any password and wraps the user in a body. */
+const IGNORES_THE_SKILL = `
+export const result = (deps) => async ({ email, password }) => {
+  if (await deps.isEmailTaken(email)) return { status: 409, body: { message: 'taken' } };
+  const user = await deps.createUser({ email, password });
+  return { status: 201, body: { user } };
+};
+`;
+
+describe('the README code tests example', () => {
+  it('shows every file of test/fixtures/signup, and only those', () => {
+    expect([...readmeFiles(SIGNUP_SECTION).keys()].sort()).toEqual(filesUnder(SIGNUP));
+  });
+
+  it('shows each file exactly as it is in test/fixtures/signup', () => {
+    for (const [file, text] of readmeFiles(SIGNUP_SECTION)) {
+      expect(text, file).toBe(lf(readFileSync(path.join(SIGNUP, file), 'utf8')));
+    }
+  });
+
+  it('passes check, with no hint-word warning', { timeout: 60_000 }, async () => {
+    const { code, stdout, stderr } = await check(SIGNUP);
+
+    expect(stderr).toBe('');
+    expect(stdout).toBe(
+      'typecheck: off\ncoverage: off\ncode tests: 2 test file(s) parse\nResult: pass\n',
+    );
+    expect(code).toBe(0);
+    expect(readmeShows(stdout), 'the README shows this output').toBe(true);
+  });
+
+  it('warns about a hint word, as the README shows', { timeout: 60_000 }, async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'skill-be-signup-'));
+    try {
+      await cp(SIGNUP, dir, { recursive: true });
+      const evals = path.join(dir, 'evals', 'signup.json');
+      const text = await readFile(evals, 'utf8');
+      const ending = '=> { status, body }"';
+      expect(text.split(ending)).toHaveLength(2);
+      const hinted = `=> { status, body }, where body is { errors } for a rejection"`;
+      await writeFile(evals, text.replace(ending, hinted));
+
+      const { code, stderr } = await check(dir);
+
+      expect(code).toBe(0);
+      expect(readmeShows(stderr), `the README shows this warning:\n${stderr}`).toBe(true);
+      expect(readme()).toContain(', where body is { errors } for a rejection');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('shows the baseline prompt, and the with-skill prompt ends the same way', async () => {
+    const config = await loadConfig(path.join(SIGNUP, 'skill-be.yaml'));
+    const { suites } = await loadSuites(config);
+    const suite = suites[0]!;
+
+    const { baseline, withSkill } = armPrompts(
+      config.withSkillTemplate,
+      suite.skillText,
+      suite.scenarios[0]!,
+    );
+
+    expect(readmeShows(`${baseline}\n`), 'the README shows this prompt').toBe(true);
+    const paragraph = baseline.slice(baseline.indexOf('Answer format:'));
+    expect(withSkill.endsWith(`\n\n${paragraph}`)).toBe(true);
+  });
+
+  it(
+    'runs its tests: an answer that follows the skill passes them, one that does not fails',
+    { timeout: 60_000 },
+    async () => {
+      const dir = await mkdtemp(path.join(os.tmpdir(), 'skill-be-signup-'));
+      try {
+        await cp(SIGNUP, dir, { recursive: true });
+        const config = await loadConfig(path.join(dir, 'skill-be.yaml'));
+        const { suites } = await loadSuites(config);
+        const quiet = { keepDeps: false, log: () => {} };
+        const codeTests = await prepareCodeTests(config, suites, quiet);
+        try {
+          const names = codeTests.suites[0]!.scenarios[0]!.tests;
+          expect(names).toHaveLength(3);
+          for (const name of names) {
+            expect(readme(), name).toContain(`| [test] ${name} |`);
+          }
+
+          const followed = await codeTests.run('signup', 'new-signup', reply(FOLLOWS_THE_SKILL));
+          const ignored = await codeTests.run('signup', 'new-signup', reply(IGNORES_THE_SKILL));
+
+          expect(followed.infraError).toBeNull();
+          expect(followed.outcomes.map(({ name, pass }) => ({ name, pass }))).toEqual(
+            names.map((name) => ({ name, pass: true })),
+          );
+          expect(ignored.infraError).toBeNull();
+          expect(ignored.outcomes.map(({ pass }) => pass)).toEqual([false, true, false]);
+        } finally {
+          await codeTests.dispose();
+        }
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    },
+  );
 });

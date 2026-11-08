@@ -2,31 +2,43 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { Option, TryAsync, repeatWhile } from '@ngwes/mini-fp';
 import { isConfigProblem, resolveAdapter, type Adapter } from './adapters/index.js';
+import { armPrompts } from './code-tests/contract.js';
+import type { TestOutcome } from './code-tests/execute.js';
+import type { CodeTests } from './code-tests/runtime.js';
 import { gradeOutput, type Verdicts } from './grader.js';
 import { createLimiter } from './limiter.js';
+import { scoredLines } from './scored-lines.js';
 import type { AdapterSettings, Config, Scenario, SkillSuite } from './types.js';
 
-/** One criterion's share of YES verdicts over the reps, as a rounded percentage per arm. */
+/**
+ * One scored line's share of YES verdicts (a criterion) or passes (a test) over the reps, as a
+ * rounded percentage per arm.
+ */
 export type CriterionScore = { baselinePct: number; withSkillPct: number };
 
 export type ModelResult = {
   /** The model's label: its id, or `adapter:id` when several models under test share the id. */
   model: string;
-  /** One score per criterion, in criterion order. */
+  /** One score per line of `scoredLines(scenario)`: the criteria, then the tests. */
   criteria: CriterionScore[];
   /** `[ERROR] ...` notes first, then `[NOTE] ...` notes, each naming the rep and arm. */
   notes: string[];
-  /** Outputs that could not be generated or graded; their criteria counted as 0. */
+  /**
+   * One per output that could not be generated (all its lines counted as 0), and one per output
+   * whose gradings all failed or whose tests could not run (that part's lines counted as 0).
+   */
   errors: number;
-  /** One entry per rep, in rep order: what each arm answered and what the grader replied. */
+  /** One entry per rep, in rep order: what each arm answered, the grader replied, the tests said. */
   outputs: RepOutputs[];
 };
 
 /**
- * One arm's output as its file holds it (`[ERROR: ...]` when it could not be generated), and the
- * grader's raw answers as their files hold them (none for an output that was not generated).
+ * One arm's output as its file holds it (`[ERROR: ...]` when it could not be generated), the
+ * grader's raw answers as their files hold them, and the outcome of each code test, in the
+ * scenario's test order. Neither the grader nor the tests run for an output that was not
+ * generated, and neither runs for a scenario with no criteria or no tests: both are `[]` then.
  */
-export type ArmOutput = { output: string; gradings: string[] };
+export type ArmOutput = { output: string; gradings: string[]; tests: TestOutcome[] };
 
 /** Both arms of one rep, by their name in file names. */
 export type RepOutputs = Record<Arm, ArmOutput>;
@@ -53,6 +65,11 @@ export type RunDeps = {
    * share it. A new {@link resultsTimestamp} by default.
    */
   timestamp?: string;
+  /**
+   * Runs a scenario's code tests against an output; required when a scenario has tests (see
+   * `prepareCodeTests`).
+   */
+  codeTests?: Pick<CodeTests, 'run'>;
 };
 
 /** The arms, by their name in file names. */
@@ -66,20 +83,38 @@ const ARM_LABELS: Record<Arm, string> = { baseline: 'baseline', 'with-skill': 'w
 /** A model under test with its resolved adapter, its label and its results directory name. */
 type Model = { settings: AdapterSettings; adapter: Adapter; label: string; dir: string };
 
-/** One graded output: its verdicts (`null` when it counts as an error), its notes and its texts. */
-type OutputResult = { verdicts: Verdicts | null; notes: string[]; kept: ArmOutput };
+/**
+ * One scored output: a 0 or 1 per scored line (0 for a line that could not be scored), its notes,
+ * its errors and its texts.
+ */
+type OutputResult = { verdicts: Verdicts; notes: string[]; errors: number; kept: ArmOutput };
+
+/**
+ * One part of an output's score, the judge's or the tests': a 0 or 1 per line of that part, its
+ * notes, its errors and what the progress line says of it (`null` when the part has no lines).
+ */
+type Part = { verdicts: Verdicts; notes: string[]; errors: number; outcome: string | null };
+
+/** The part of a scenario without criteria or without tests. */
+const NO_LINES: Part = { verdicts: [], notes: [], errors: 0, outcome: null };
 
 /**
  * Runs the benchmark of one skill: for every scenario and every model under test, `reps`
- * generations per arm (baseline and with skill), each graded `gradings` times. Every generation
- * and grading call goes through one limiter of `config.concurrency`.
+ * generations per arm (baseline and with skill), each graded `gradings` times when the scenario
+ * has criteria and run against its code tests when it has tests. Every generation, grading call
+ * and test run goes through one limiter of `config.concurrency`.
  *
- * Writes each output to `<results>/<timestamp>/<skill>/<scenario>/<model>/rep-<n>-<arm>.md` and
- * each raw grader answer beside it as `rep-<n>-<arm>.grading-<k>.md`. An output that could not
- * be generated or graded counts its criteria as 0, carries an `[ERROR]` note and adds to
- * `errorCount`; what that means for the verdict is the gate's business. A `ConfigError` an
- * adapter throws, or a CLI that cannot start, is not an output error: it rejects `runSkill`, so
- * the CLI can exit with 2 (see `isConfigProblem`).
+ * Writes each output to `<results>/<timestamp>/<skill>/<scenario>/<model>/rep-<n>-<arm>.md`,
+ * each raw grader answer beside it as `rep-<n>-<arm>.grading-<k>.md` and its test outcomes as
+ * `rep-<n>-<arm>.tests.json`. An output that could not be generated counts every line as 0; one
+ * whose gradings all failed counts the criteria as 0; one whose tests could not run counts the
+ * tests as 0. Each of these carries an `[ERROR]` note and adds to `errorCount`; a test the answer
+ * fails is a score, not an error. What that means for the verdict is the gate's business. A
+ * `ConfigError` an adapter throws, or a CLI that cannot start, is not an output error: it rejects
+ * `runSkill`, so the CLI can exit with 2 (see `isConfigProblem`).
+ *
+ * @throws Error, before any call, when a scenario has tests and `deps.codeTests` is not given,
+ * or when a scenario has neither criteria nor tests.
  */
 export async function runSkill(
   suite: SkillSuite,
@@ -87,6 +122,19 @@ export async function runSkill(
   deps: RunDeps = {},
 ): Promise<SkillRun> {
   const started = Date.now();
+  const codeTests = deps.codeTests;
+  const tested = suite.scenarios.find((scenario) => scenario.tests.length > 0);
+  if (tested !== undefined && codeTests === undefined) {
+    throw new Error(
+      `scenario "${tested.id}" of skill "${suite.name}" has code tests, ` +
+        'but no codeTests were given',
+    );
+  }
+  // Parsing and `prepareCodeTests` reject such a scenario: it would pass with nothing scored.
+  const unscored = suite.scenarios.find((scenario) => scoredLines(scenario).length === 0);
+  if (unscored !== undefined) {
+    throw new Error(`scenario "${unscored.id}" of skill "${suite.name}" has nothing to score`);
+  }
   const log = deps.log ?? ((line: string) => process.stderr.write(`${line}\n`));
   const adapterFor =
     deps.adapterFor ??
@@ -124,7 +172,84 @@ export async function runSkill(
       `${config.reps} reps, concurrency ${config.concurrency}`,
   );
 
-  /** Generates one output, writes it, grades it and writes the grader's answers. */
+  /**
+   * Grades one output against the scenario's criteria and writes the grader's answers; nothing
+   * to do for a scenario without criteria.
+   */
+  async function judge(
+    scenario: Scenario,
+    output: string,
+    file: string,
+  ): Promise<Part & { rawAnswers: string[] }> {
+    if (scenario.criteria.length === 0) return { ...NO_LINES, rawAnswers: [] };
+    const graded = await gradeOutput(
+      scenario.criteria,
+      output,
+      grade,
+      config.gradings,
+      config.graderPrompt ?? undefined,
+    );
+    await Promise.all(
+      graded.rawAnswers.map((answer, k) => writeFile(`${file}.grading-${k + 1}.md`, answer)),
+    );
+    const part = Option.from(graded.verdicts).match<Part>(
+      (verdicts) => ({
+        verdicts,
+        notes: graded.notes,
+        errors: 0,
+        outcome: `${verdicts.reduce<number>((sum, v) => sum + v, 0)}/${verdicts.length} YES`,
+      }),
+      // `notes` then holds the one `[ERROR]` note of the failure.
+      () => ({
+        verdicts: zeros(scenario.criteria),
+        notes: graded.notes,
+        errors: 1,
+        outcome: 'grading FAILED',
+      }),
+    );
+    return { ...part, rawAnswers: graded.rawAnswers };
+  }
+
+  /**
+   * Runs the scenario's code tests against one output and writes their outcomes; nothing to do
+   * for a scenario without tests. A test the answer fails scores 0; tests that could not run
+   * score 0 and count as an error.
+   */
+  async function runTests(
+    scenario: Scenario,
+    output: string,
+    file: string,
+  ): Promise<Part & { outcomes: TestOutcome[] }> {
+    // `runSkill` checked up front that every scenario with tests has `codeTests`.
+    if (scenario.tests.length === 0 || codeTests === undefined) {
+      return { ...NO_LINES, outcomes: [] };
+    }
+    const { outcomes, infraError } = await limit(() =>
+      codeTests.run(suite.name, scenario.id, output),
+    );
+    await writeFile(`${file}.tests.json`, `${JSON.stringify(outcomes, null, 2)}\n`);
+    const part = Option.from(infraError).match<Part>(
+      (reason) => ({
+        verdicts: zeros(scenario.tests),
+        notes: [`[ERROR] code tests could not run: ${oneLine(reason)}`],
+        errors: 1,
+        outcome: 'tests could not run',
+      }),
+      () => {
+        const verdicts: Verdicts = outcomes.map((outcome) => (outcome.pass ? 1 : 0));
+        const passed = verdicts.reduce<number>((sum, v) => sum + v, 0);
+        return {
+          verdicts,
+          notes: [],
+          errors: 0,
+          outcome: `${passed}/${verdicts.length} tests passed`,
+        };
+      },
+    );
+    return { ...part, outcomes };
+  }
+
+  /** Generates one output, writes it, then grades it and runs its tests side by side. */
   async function runOutput(
     scenario: Scenario,
     model: Model,
@@ -137,25 +262,17 @@ export async function runSkill(
       async (output) => {
         await writeFile(`${file}.md`, output);
 
-        const graded = await gradeOutput(
-          scenario.criteria,
-          output,
-          grade,
-          config.gradings,
-          config.graderPrompt ?? undefined,
-        );
-        await Promise.all(
-          graded.rawAnswers.map((answer, k) => writeFile(`${file}.grading-${k + 1}.md`, answer)),
-        );
-        const outcome = Option.from(graded.verdicts).match(
-          (verdicts) => `${verdicts.reduce<number>((sum, v) => sum + v, 0)}/${verdicts.length} YES`,
-          () => 'grading FAILED',
-        );
-        log(`  ${tag}: ${outcome} (${seconds(Date.now() - t0)})`);
+        const [judged, tested] = await Promise.all([
+          judge(scenario, output, file),
+          runTests(scenario, output, file),
+        ]);
+        const outcome = [judged.outcome, tested.outcome].filter((part) => part !== null);
+        log(`  ${tag}: ${outcome.join(', ')} (${seconds(Date.now() - t0)})`);
         return {
-          verdicts: graded.verdicts,
-          notes: graded.notes,
-          kept: { output, gradings: graded.rawAnswers },
+          verdicts: [...judged.verdicts, ...tested.verdicts],
+          notes: [...judged.notes, ...tested.notes],
+          errors: judged.errors + tested.errors,
+          kept: { output, gradings: judged.rawAnswers, tests: tested.outcomes },
         };
       },
       async (error) => {
@@ -166,9 +283,10 @@ export async function runSkill(
         await writeFile(`${file}.md`, text);
         log(`  ${tag}: generation failed — ${message.slice(0, 200)}`);
         return {
-          verdicts: null,
+          verdicts: zeros(scoredLines(scenario)),
           notes: [`[ERROR] generation failed, criteria counted as 0: ${message}`],
-          kept: { output: text, gradings: [] },
+          errors: 1,
+          kept: { output: text, gradings: [], tests: [] },
         };
       },
     );
@@ -190,9 +308,10 @@ export async function runSkill(
         path.join(dir, `rep-${rep}-${name}`),
         `${label} ${ARM_LABELS[name]}`,
       );
+    const prompts = armPrompts(config.withSkillTemplate, suite.skillText, scenario);
     const [baseline, withSkill] = await Promise.all([
-      arm('baseline', scenario.prompt),
-      arm('with-skill', fillTemplate(config.withSkillTemplate, suite.skillText, scenario.prompt)),
+      arm('baseline', prompts.baseline),
+      arm('with-skill', prompts.withSkill),
     ]);
     doneReps++;
     log(
@@ -202,7 +321,7 @@ export async function runSkill(
     return { baseline, 'with-skill': withSkill };
   }
 
-  /** Every rep of one model on one scenario, scored per criterion. */
+  /** Every rep of one model on one scenario, scored per line of `scoredLines(scenario)`. */
   async function runModel(
     scenario: Scenario,
     scenarioDir: string,
@@ -214,8 +333,8 @@ export async function runSkill(
       Array.from({ length: config.reps }, (_, r) => runRep(scenario, model, dir, r + 1)),
     );
 
-    const pct = (arm: Arm, criterion: number): number => {
-      const yes = reps.reduce((sum, rep) => sum + (rep[arm].verdicts?.[criterion] ?? 0), 0);
+    const pct = (arm: Arm, line: number): number => {
+      const yes = reps.reduce((sum, rep) => sum + (rep[arm].verdicts[line] ?? 0), 0);
       return Math.round((yes / config.reps) * 100);
     };
     const notes = reps.flatMap((rep, r) =>
@@ -225,9 +344,9 @@ export async function runSkill(
     );
     return {
       model: model.label,
-      criteria: scenario.criteria.map((_, c) => ({
-        baselinePct: pct('baseline', c),
-        withSkillPct: pct('with-skill', c),
+      criteria: scoredLines(scenario).map((_, line) => ({
+        baselinePct: pct('baseline', line),
+        withSkillPct: pct('with-skill', line),
       })),
       // Errors first, as run-benchmark.mjs lists them.
       notes: [
@@ -235,7 +354,7 @@ export async function runSkill(
         ...notes.filter((note) => !note.startsWith('[ERROR]')),
       ],
       errors: reps.reduce(
-        (sum, rep) => sum + ARMS.filter((arm) => rep[arm].verdicts === null).length,
+        (sum, rep) => sum + ARMS.reduce((n, arm) => n + rep[arm].errors, 0),
         0,
       ),
       outputs: reps.map((rep) => ({
@@ -324,6 +443,11 @@ function uniqueSegments(names: readonly string[]): string[] {
     used.add(unique.toLowerCase());
     return unique;
   });
+}
+
+/** A 0 verdict per line: the score of lines that could not be scored. */
+function zeros(lines: readonly string[]): Verdicts {
+  return lines.map((): 0 => 0);
 }
 
 /** An error message on one line, so it fits in a note and a markdown list item. */

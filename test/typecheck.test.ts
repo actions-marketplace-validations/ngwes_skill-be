@@ -20,6 +20,9 @@ function skill(...parts: string[]): SkillSuite {
     skillText: '# Box\n\n' + parts.join('\n'),
     evalPath: path.join(FIXTURES, 'evals', 'box.json'),
     scenarios: [],
+    testFiles: {},
+    codeFiles: [],
+    packageList: null,
   };
 }
 
@@ -312,7 +315,16 @@ describe.runIf(Boolean(SKILLS_REPO && MINI_FP_ENTRY))('the mini-fp-skills exampl
     const { readFile } = await import('node:fs/promises');
     const skillPath = path.join(SKILLS, name, 'SKILL.md');
     const skillText = edit(await readFile(skillPath, 'utf8'));
-    return { name, skillPath, skillText, evalPath: '', scenarios: [] };
+    return {
+      name,
+      skillPath,
+      skillText,
+      evalPath: '',
+      scenarios: [],
+      testFiles: {},
+      codeFiles: [],
+      packageList: null,
+    };
   }
 
   it('typechecks all nine skills with zero problems', { timeout: 120_000 }, async () => {

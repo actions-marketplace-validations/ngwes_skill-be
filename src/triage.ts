@@ -1,7 +1,8 @@
 /**
- * Triage: a closer look at the criteria that failed in the latest run. For each one it generates
- * fresh with-skill samples, grades them with the grader's reasons kept, and asks a model to
- * propose one of four classifications, for a human to confirm. It never blocks anything.
+ * Triage: a closer look at the criteria and code tests that failed in the latest run. For each
+ * one it generates fresh with-skill samples, grades them with the grader's reasons kept (or runs
+ * them against the code tests, with the failure messages kept), and asks a model to propose one
+ * of four classifications, for a human to confirm. It never blocks anything.
  */
 
 import { readdir, readFile, writeFile } from 'node:fs/promises';
@@ -9,12 +10,16 @@ import path from 'node:path';
 import { Either, Option, Try, TryAsync, foldAsync } from '@ngwes/mini-fp';
 import { isConfigProblem, resolveAdapter, type Adapter } from './adapters/index.js';
 import { valueOrThrow } from './checked.js';
+import { armPrompts, contractParagraph } from './code-tests/contract.js';
+import type { CodeTests } from './code-tests/runtime.js';
 import { gradeOutput, graderReasons, parseVerdicts } from './grader.js';
 import { createLimiter } from './limiter.js';
 import { cell, type RunSummary, type SkillSummary } from './report.js';
-import { fillTemplate, modelLabels, resultsTimestamp, type CriterionScore } from './runner.js';
+import { modelLabels, resultsTimestamp, type CriterionScore } from './runner.js';
+import { TEST_LINE_PREFIX } from './scored-lines.js';
 import type { AdapterSettings, Config, Scenario, SkillSuite } from './types.js';
 
+/** The categories a failing judge criterion is classified into. */
 export const TRIAGE_CATEGORIES = [
   'skill gap',
   'eval too strict',
@@ -22,7 +27,17 @@ export const TRIAGE_CATEGORIES = [
   'model choice',
 ] as const;
 
-export type TriageCategory = (typeof TRIAGE_CATEGORIES)[number];
+/** The categories a failing code test is classified into: `test error` replaces `grader error`. */
+export const TEST_TRIAGE_CATEGORIES = [
+  'skill gap',
+  'eval too strict',
+  'test error',
+  'model choice',
+] as const;
+
+export type TriageCategory =
+  | (typeof TRIAGE_CATEGORIES)[number]
+  | (typeof TEST_TRIAGE_CATEGORIES)[number];
 
 /** The definitions the triage model classifies by, from the design. */
 const DEFINITIONS: Record<TriageCategory, string> = {
@@ -31,13 +46,16 @@ const DEFINITIONS: Record<TriageCategory, string> = {
     'the answer is correct and idiomatic, but the criterion demands one form or something the ' +
     "prompt didn't ask for",
   'grader error': 'the answer satisfies the criterion and the grader still says NO',
+  'test error':
+    'the test, not the answer, is wrong (too strict, or it checks something the task did not ' +
+    'ask for)',
   'model choice': 'the skill is clear and the model picks another reasonable approach',
 };
 
 export type TriageItem = {
   skill: string;
   scenario: string;
-  /** The criterion's text. */
+  /** The criterion's text, or the code test's scored line, `[test] <name>`. */
   criterion: string;
   /** The label of the model under test whose samples were triaged, as in the run. */
   model: string;
@@ -56,22 +74,35 @@ export type TriageDeps = {
   log?: (line: string) => void;
   /** Names the report, `triage-<timestamp>.md`; a new `resultsTimestamp()` by default. */
   timestamp?: string;
+  /**
+   * Prepares the code tests of the given suites (see `prepareCodeTests`); required when a code
+   * test is to be triaged. Called once, with the suites that have one, before any model call, and
+   * not at all when only criteria are triaged. The caller disposes of what it returns.
+   */
+  prepareCodeTests?: (suites: SkillSuite[]) => Promise<TestRunner>;
 };
 
+/** What triage uses of the prepared code tests. */
+type TestRunner = Pick<CodeTests, 'suites' | 'run'>;
+
 export type TriageOptions = {
-  /** Also triage every criterion that scored under this percentage with the skill. */
+  /** Also triage every criterion or code test that scored under this percentage with the skill. */
   below?: number;
   /** Fresh with-skill samples per failing criterion; 2 by default. */
   samples?: number;
   deps?: TriageDeps;
 };
 
-/** One failure to triage: a criterion of a scenario, on one model under test. */
+/** The failing line of a target: a judge criterion, or a code test. */
+type Line = { criterion: number } | { test: string };
+
+/** One failure to triage: a criterion or a code test of a scenario, on one model under test. */
 type Target = {
   suite: SkillSuite;
+  /** The scenario of the current eval file; for a code test, with its `tests` filled. */
   scenario: Scenario;
-  /** The criterion's index in the current eval file. */
-  criterion: number;
+  /** The criterion by its index in the current eval file, or the code test by its name. */
+  line: Line;
   label: string;
   settings: AdapterSettings;
   /** Why it is triaged: the blocks it caused and whether it scored under `below`. */
@@ -82,8 +113,13 @@ type Target = {
 /** One graded grading of a sample: its verdict on the triaged criterion and its reasons. */
 type Grading = { verdict: 0 | 1 | null; reasons: string };
 
+/**
+ * A sample: graded (a criterion), run against the code tests (a code test: the verdict is that
+ * test's outcome, `testMessage` its message, or why it has no verdict), or not generated.
+ */
 type Sample =
   | { output: string; verdict: 0 | 1 | null; gradings: Grading[] }
+  | { output: string; verdict: 0 | 1 | null; testMessage: string }
   | { error: string };
 
 type Triaged = { target: Target; samples: Sample[]; item: TriageItem };
@@ -92,23 +128,29 @@ type Triaged = { target: Target; samples: Sample[]; item: TriageItem };
 const RUN_DIR = /^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z$/;
 
 /**
- * Triages the failing criteria of the given skills in the latest run: the newest results
- * directory with a `summary.json`. A criterion fails when it caused a `zero` block (triaged on
- * every model under test) or a `regression` block (on its model), and, with `below`, when it
- * scored under `below`% with the skill on a model. `error` blocks name no criterion: they are
- * listed in the report as not triaged, and so is a failure whose scenario, criterion or model
- * the current eval file or config no longer has.
+ * Triages the failing criteria and code tests of the given skills in the latest run: the newest
+ * results directory with a `summary.json`. A scored line (a criterion, or a code test) fails when
+ * it caused a `zero` block (triaged on every model under test) or a `regression` block (on its
+ * model), and, with `below`, when it scored under `below`% with the skill on a model. `error`
+ * blocks name no line: they are listed in the report as not triaged, and so is a failure whose
+ * scenario, criterion, code test or model the current eval file, tests or config no longer has.
+ * The code tests are prepared (`deps.prepareCodeTests`) only when a code test fails.
  *
- * For each failure: `samples` with-skill generations by that model, each graded `gradings` times
- * with the grader prompt (which asks for a reason per criterion), then one classification by
- * `triage.model`, else by that failure's own model under test (the one whose output failed, not
- * the grader, since grader errors are one of the categories). Every call goes through one
- * limiter of `concurrency`. A failed call is recorded in the report; a config problem (a
- * `ConfigError`, or a CLI that cannot start: see `isConfigProblem`) rejects `triage`.
+ * For each failure: `samples` with-skill generations by that model, with the scenario's output
+ * contract and never its tests. For a criterion, each sample is graded `gradings` times with the
+ * grader prompt (which asks for a reason per criterion); for a code test, each runs against the
+ * scenario's tests, without the grader. Then one classification by `triage.model`, else by that
+ * failure's own model under test (the one whose output failed, not the grader, since grader and
+ * test errors are among the categories). Every call and test run goes through one limiter of
+ * `concurrency`. A failed call is recorded in the report; a config problem (a `ConfigError`, or a
+ * CLI that cannot start: see `isConfigProblem`) rejects `triage`.
  *
- * Writes `<run dir>/triage-<timestamp>.md` with the code, the grader reasons and the proposals.
+ * Writes `<run dir>/triage-<timestamp>.md` with the code, the grader reasons or test messages, and
+ * the proposals.
  *
  * @throws ConfigError when there is no run with a summary, or the summary cannot be read.
+ * @throws Error, before any model call, when a code test fails and `deps.prepareCodeTests` is not
+ * given.
  */
 export async function triage(
   config: Config,
@@ -125,16 +167,22 @@ export async function triage(
     Option.from(config.triage.model).orElse(target.settings);
 
   const run = await latestRun(config.results);
-  const { targets, notes } = selectTargets(run.summary, suites, config.models, opts.below);
+  const { selection, codeTests } = await withCodeTests(
+    selectTargets(run.summary, suites, config.models, opts.below),
+    deps.prepareCodeTests,
+  );
+  const targets = selection.flatMap((entry) => entry.match((target) => [target], () => []));
+  const notes = selection.flatMap((entry) => entry.match(() => [], (note) => [note]));
   const reportPath = path.join(run.dir, `triage-${deps.timestamp ?? resultsTimestamp()}.md`);
   log(`triage: ${targets.length} failure(s) to triage in run ${run.name}`);
 
   // Resolve every adapter before the first call, so a config error stops triage at once.
   const adapters = new Map<AdapterSettings, Adapter>();
   if (targets.length > 0) {
+    const graded = targets.some((t) => 'criterion' in t.line);
     const needed = new Set([
       ...targets.flatMap((t) => [t.settings, classifierOf(t)]),
-      config.grader,
+      ...(graded ? [config.grader] : []),
     ]);
     for (const settings of needed) adapters.set(settings, await adapterFor(settings));
   }
@@ -148,25 +196,12 @@ export async function triage(
   const grade = (prompt: string): Promise<string> => call(config.grader, prompt);
 
   function sample(target: Target, prompt: string): Promise<Sample> {
+    const { line } = target;
     return TryAsync.runAsync(() => call(target.settings, prompt)).match<Sample>(
-      async (output) => {
-        const { criteria } = target.scenario;
-        const graded = await gradeOutput(
-          criteria,
-          output,
-          grade,
-          config.gradings,
-          config.graderPrompt ?? undefined,
-        );
-        return {
-          output,
-          verdict: graded.verdicts?.[target.criterion] ?? null,
-          gradings: graded.rawAnswers.map((answer) => ({
-            verdict: parseVerdicts(answer, criteria.length)?.[target.criterion] ?? null,
-            reasons: graderReasons(answer),
-          })),
-        };
-      },
+      (output) =>
+        'test' in line
+          ? testSample(target, line.test, output)
+          : gradedSample(target, line.criterion, output),
       (error) => {
         if (isConfigProblem(error)) throw error;
         return { error: messageOf(error) };
@@ -174,11 +209,52 @@ export async function triage(
     );
   }
 
+  /** Grades one sample `gradings` times: its verdict and reasons on the criterion. */
+  async function gradedSample(target: Target, criterion: number, output: string): Promise<Sample> {
+    const { criteria } = target.scenario;
+    const graded = await gradeOutput(
+      criteria,
+      output,
+      grade,
+      config.gradings,
+      config.graderPrompt ?? undefined,
+    );
+    return {
+      output,
+      verdict: graded.verdicts?.[criterion] ?? null,
+      gradings: graded.rawAnswers.map((answer) => ({
+        verdict: parseVerdicts(answer, criteria.length)?.[criterion] ?? null,
+        reasons: graderReasons(answer),
+      })),
+    };
+  }
+
+  /** Runs one sample against the scenario's tests: its verdict is the outcome of the test. */
+  async function testSample(target: Target, test: string, output: string): Promise<Sample> {
+    // `withCodeTests` prepared the code tests, since a code test is triaged.
+    const { outcomes, infraError } = await limit(() =>
+      (codeTests as TestRunner).run(target.suite.name, target.scenario.id, output),
+    );
+    if (infraError !== null) return { output, verdict: null, testMessage: infraError };
+    return Option.from(outcomes.find((outcome) => outcome.name === test)).match<Sample>(
+      (outcome) => ({ output, verdict: outcome.pass ? 1 : 0, testMessage: outcome.message }),
+      () => ({ output, verdict: null, testMessage: `the test "${test}" reported no outcome` }),
+    );
+  }
+
+  /** The classification prompt of a target; a code test's names its test file's source. */
+  async function promptFor(target: Target, samples: Sample[]): Promise<string> {
+    const { line, suite, scenario } = target;
+    if (!('test' in line)) return classificationPrompt(target, line.criterion, samples);
+    const source = await readFile(suite.testFiles[scenario.id] as string, 'utf8');
+    return testClassificationPrompt(target, line.test, samples, source);
+  }
+
   async function classify(target: Target, samples: Sample[]): Promise<TriageItem> {
     const item = {
       skill: target.suite.name,
       scenario: target.scenario.id,
-      criterion: target.scenario.criteria[target.criterion] as string,
+      criterion: lineText(target),
       model: target.label,
     };
     const errors = samples.flatMap((s) => ('error' in s ? [s.error] : []));
@@ -189,11 +265,10 @@ export async function triage(
         reason: `no sample could be generated: ${errors[0]}`,
       };
     }
-    return TryAsync.runAsync(() =>
-      call(classifierOf(target), classificationPrompt(target, samples)),
-    ).match<TriageItem>(
+    const prompt = await promptFor(target, samples);
+    return TryAsync.runAsync(() => call(classifierOf(target), prompt)).match<TriageItem>(
       (answer) =>
-        Option.from(parseClassification(answer)).match<TriageItem>(
+        Option.from(parseClassification(answer, categoriesOf(target))).match<TriageItem>(
           (parsed) => ({ ...item, ...parsed }),
           () => ({
             ...item,
@@ -215,11 +290,12 @@ export async function triage(
 
   const triaged: Triaged[] = await Promise.all(
     targets.map(async (target) => {
-      const prompt = fillTemplate(
+      // With the output contract, as the with-skill arm of the run had it.
+      const prompt = armPrompts(
         config.withSkillTemplate,
         target.suite.skillText,
-        target.scenario.prompt,
-      );
+        target.scenario,
+      ).withSkill;
       const samples = await Promise.all(
         Array.from({ length: sampleCount }, () => sample(target, prompt)),
       );
@@ -247,10 +323,12 @@ export async function triage(
  * a `REASON:` line after it (the last one). Markdown around a label or a value is ignored
  * (`**CLASSIFICATION:** *Grader Error*`, `- Reason: ...`, quotes, a trailing period), as are
  * case and hyphens in the category, and words after it (`grader error — it calls map`). Returns
- * `null` unless the category is one of the four and the reason is not empty.
+ * `null` unless the category is one of `categories` (a criterion's by default;
+ * {@link TEST_TRIAGE_CATEGORIES} for a code test) and the reason is not empty.
  */
 export function parseClassification(
   answer: string,
+  categories: readonly TriageCategory[] = TRIAGE_CATEGORIES,
 ): { proposed: TriageCategory; reason: string } | null {
   const lines = answer.split(/\r?\n/);
   return lastLabelled(lines, 'classification')
@@ -267,7 +345,7 @@ export function parseClassification(
         )
         .replace(/^[\s*_]+|[\s*_]+$/g, '');
       return Option.from(
-        TRIAGE_CATEGORIES.find(
+        categories.find(
           (known) => category === known || new RegExp(`^${known}(?![a-z])`).test(category),
         ),
       )
@@ -350,29 +428,35 @@ function parseSummary(text: string): Either<string, RunSummary> {
   );
 }
 
+/** How the report and the notes name a failure: its skill, scenario and model. */
+function where(skill: string, scenario: string, model: string): string {
+  return `\`${skill}\` / \`${scenario}\` / ${model}`;
+}
+
 /**
- * The failures of the given suites in a run summary, in suite, scenario, criterion and model
- * order, and a note for each skill or failure that is not triaged.
+ * The failures of the given suites in a run summary, in suite, scenario, scored line and model
+ * order (the criteria, then the code tests), with a note in its place for each skill or failure
+ * that is not triaged. A code test is matched by name later, by {@link withCodeTests}.
  */
 function selectTargets(
   summary: RunSummary,
   suites: readonly SkillSuite[],
   models: readonly AdapterSettings[],
   below: number | undefined,
-): { targets: Target[]; notes: string[] } {
+): Either<string, Target>[] {
   const labels = modelLabels(models);
-  const targets: Target[] = [];
-  const notes: string[] = [];
+  const selection: Either<string, Target>[] = [];
+  const note = (text: string): void => void selection.push(Either.left(text));
 
   for (const suite of suites) {
     const skill = summary.skills.find((s) => s.skill === suite.name);
     if (!skill) {
-      notes.push(`\`${suite.name}\`: not in this run.`);
+      note(`\`${suite.name}\`: not in this run.`);
       continue;
     }
     const errors = skill.blocks.filter((block) => block.kind === 'error').length;
     if (errors > 0) {
-      notes.push(
+      note(
         `\`${suite.name}\`: the error block (${skill.errorCount} output(s) could not be ` +
           'generated or graded) names no criterion and is not triaged; see the notes of the run.',
       );
@@ -380,47 +464,123 @@ function selectTargets(
 
     const causes = failureCauses(skill, below);
     for (const summaryScenario of skill.scenarios) {
-      summaryScenario.criteria.forEach((criterionText, c) => {
+      // The scored lines, as the summary indexes its scores. A summary older than code tests
+      // has no `tests`.
+      const lines: Array<{ criterion: string } | { test: string }> = [
+        ...summaryScenario.criteria.map((criterion) => ({ criterion })),
+        ...(summaryScenario.tests ?? []).map((test) => ({ test })),
+      ];
+      lines.forEach((summaryLine, c) => {
         for (const model of summaryScenario.models) {
           const why = causes.get(key(summaryScenario.id, c, model.model));
           if (!why) continue;
-          const where = `\`${suite.name}\` / \`${summaryScenario.id}\` / ${model.model}`;
+          const at = where(suite.name, summaryScenario.id, model.model);
           const found = (index: number): Option<number> => Option.from(index, (i) => i === -1);
-          Option.from(suite.scenarios.find((s) => s.id === summaryScenario.id))
-            .toEither(() => `${where}: the eval file no longer has this scenario; not triaged.`)
-            .bind((scenario) =>
-              found(scenario.criteria.indexOf(criterionText))
-                .map((criterion) => ({ scenario, criterion }))
-                .toEither(
-                  () =>
-                    `${where}: the eval file no longer has the criterion "${criterionText}"; ` +
-                    'not triaged.',
-                ),
-            )
-            .bind(({ scenario, criterion }) =>
+          const lineIn = (scenario: Scenario): Either<string, Line> =>
+            'test' in summaryLine
+              ? Either.right<string, Line>(summaryLine)
+              : found(scenario.criteria.indexOf(summaryLine.criterion))
+                  .map((criterion): Line => ({ criterion }))
+                  .toEither(
+                    () =>
+                      `${at}: the eval file no longer has the criterion ` +
+                      `"${summaryLine.criterion}"; not triaged.`,
+                  );
+          const entry = Option.from(suite.scenarios.find((s) => s.id === summaryScenario.id))
+            .toEither(() => `${at}: the eval file no longer has this scenario; not triaged.`)
+            .bind((scenario) => lineIn(scenario).map((line) => ({ scenario, line })))
+            .bind(({ scenario, line }) =>
               found(labels.indexOf(model.model))
                 .map(
                   (m): Target => ({
                     suite,
                     scenario,
-                    criterion,
+                    line,
                     label: model.model,
                     settings: models[m] as AdapterSettings,
                     causes: why,
                     score: model.criteria[c] ?? { baselinePct: 0, withSkillPct: 0 },
                   }),
                 )
-                .toEither(() => `${where}: the config no longer has this model; not triaged.`),
-            )
-            .match(
-              (target) => void targets.push(target),
-              (note) => void notes.push(note),
+                .toEither(() => `${at}: the config no longer has this model; not triaged.`),
             );
+          selection.push(entry);
         }
       });
     }
   }
-  return { targets, notes };
+  return selection;
+}
+
+/**
+ * The selection with each code test matched by name in the current code tests, prepared once for
+ * the suites with a code test to triage: the target gets the prepared scenario, whose `tests` are
+ * filled, and a test they no longer have becomes a note. Without a code test, nothing is
+ * prepared.
+ *
+ * @throws Error when a code test is to be triaged and `prepare` is not given.
+ */
+async function withCodeTests(
+  selection: Either<string, Target>[],
+  prepare: ((suites: SkillSuite[]) => Promise<TestRunner>) | undefined,
+): Promise<{ selection: Either<string, Target>[]; codeTests: TestRunner | null }> {
+  const tested = [
+    ...new Set(
+      selection.flatMap((entry) =>
+        entry.match((target) => ('test' in target.line ? [target.suite] : []), () => []),
+      ),
+    ),
+  ];
+  if (tested.length === 0) return { selection, codeTests: null };
+  if (prepare === undefined) {
+    throw new Error(
+      `skill "${(tested[0] as SkillSuite).name}" has code tests to triage, ` +
+        'but no prepareCodeTests was given',
+    );
+  }
+  const codeTests = await prepare(tested);
+  const matched = (target: Target, test: string): Either<string, Target> =>
+    Option.from(codeTests.suites.find((suite) => suite.name === target.suite.name))
+      .bind((suite) =>
+        Option.from(suite.scenarios.find((s) => s.id === target.scenario.id)).map((scenario) => ({
+          suite,
+          scenario,
+        })),
+      )
+      .filter(({ scenario }) => scenario.tests.includes(test))
+      .map(({ suite, scenario }): Target => ({ ...target, suite, scenario }))
+      .toEither(
+        () =>
+          `${where(target.suite.name, target.scenario.id, target.label)}: the code tests no ` +
+          `longer have the test "${test}"; not triaged.`,
+      );
+  return {
+    codeTests,
+    selection: selection.map((entry) =>
+      entry.bind((target) =>
+        'test' in target.line ? matched(target, target.line.test) : Either.right(target),
+      ),
+    ),
+  };
+}
+
+/** The scored line of a target, as the run's report names it. */
+function lineText({ scenario, line }: Target): string {
+  return 'test' in line
+    ? `${TEST_LINE_PREFIX}${line.test}`
+    : (scenario.criteria[line.criterion] as string);
+}
+
+/** The number of a target's scored line in its scenario: the criteria first, then the tests. */
+function lineNumber({ scenario, line }: Target): number {
+  return 'test' in line
+    ? scenario.criteria.length + scenario.tests.indexOf(line.test) + 1
+    : line.criterion + 1;
+}
+
+/** The categories a target is classified into. */
+function categoriesOf(target: Target): readonly TriageCategory[] {
+  return 'test' in target.line ? TEST_TRIAGE_CATEGORIES : TRIAGE_CATEGORIES;
 }
 
 /** Why each (scenario, criterion, model) of a skill is triaged, keyed by {@link key}. */
@@ -465,9 +625,20 @@ function key(scenario: string, criterion: number, model: string): string {
 const verdictText = (verdict: 0 | 1 | null): string =>
   verdict === null ? 'no verdict' : verdict ? 'YES' : 'NO';
 
-/** The prompt that asks the triage model for a classification and a one-line reason. */
-function classificationPrompt(target: Target, samples: readonly Sample[]): string {
-  const { scenario, criterion } = target;
+/** A code test's verdict on a sample, as the prompt and the report name it. */
+const testVerdictText = (verdict: 0 | 1 | null): string =>
+  verdict === null ? 'no verdict' : verdict ? 'PASS' : 'FAIL';
+
+/**
+ * The prompt that asks the triage model for a classification of a failing criterion and a
+ * one-line reason.
+ */
+function classificationPrompt(
+  target: Target,
+  criterion: number,
+  samples: readonly Sample[],
+): string {
+  const { scenario } = target;
   const n = criterion + 1;
   const parts: string[] = [
     'You are triaging a failure in a benchmark of an Agent Skill. The skill is documentation ' +
@@ -492,7 +663,7 @@ function classificationPrompt(target: Target, samples: readonly Sample[]): strin
   ];
 
   samples.forEach((sample, i) => {
-    if ('error' in sample) return;
+    if (!('gradings' in sample)) return;
     parts.push(
       '',
       `<sample number="${i + 1}" ` +
@@ -513,6 +684,66 @@ function classificationPrompt(target: Target, samples: readonly Sample[]): strin
       'reply with exactly these two lines and nothing after them:',
     `CLASSIFICATION: <one of: ${TRIAGE_CATEGORIES.join(', ')}>`,
     'REASON: <one line saying why, citing the answer>',
+  );
+  return parts.join('\n');
+}
+
+/**
+ * The prompt that asks the triage model for a classification of a failing code test and a
+ * one-line reason: the task with its answer format, the test file's source, and each sample with
+ * the test's result and message.
+ */
+function testClassificationPrompt(
+  target: Target,
+  test: string,
+  samples: readonly Sample[],
+  source: string,
+): string {
+  const { scenario } = target;
+  const task = Option.from(scenario.output).match(
+    (output) => `${scenario.prompt}\n\n${contractParagraph(output)}`,
+    () => scenario.prompt,
+  );
+  const parts: string[] = [
+    'You are triaging a failure in a benchmark of an Agent Skill. The skill is documentation ' +
+      'given to a model in its prompt; the model then answers a task with code, and the code is ' +
+      'run against the tests of the task. One test keeps failing with the skill. Below are the ' +
+      'skill, the task, the test file, and fresh answers written with the skill, each with the ' +
+      "test's result and its message.",
+    '',
+    'Classify the failure into exactly one of these categories:',
+    ...TEST_TRIAGE_CATEGORIES.map((category) => `- ${category}: ${DEFINITIONS[category]};`),
+    '',
+    `<skill>\n${target.suite.skillText}\n</skill>`,
+    '',
+    `<task>\n${task}\n</task>`,
+    '',
+    `<test-file>\n${source}\n</test-file>`,
+    '',
+    `The failing test is "${test}".`,
+    `In the benchmark run, ${target.label} passed it in ${target.score.baselinePct}% of the ` +
+      `answers without the skill and in ${target.score.withSkillPct}% with it.`,
+  ];
+
+  samples.forEach((sample, i) => {
+    if (!('testMessage' in sample)) return;
+    parts.push(
+      '',
+      `<sample number="${i + 1}" test-result="${testVerdictText(sample.verdict)}">`,
+      `<answer>\n${sample.output}\n</answer>`,
+      ...(sample.testMessage === ''
+        ? []
+        : [`<test-message>\n${sample.testMessage}\n</test-message>`]),
+      '</sample>',
+    );
+  });
+
+  parts.push(
+    '',
+    'Check the answer against the test and the task yourself before trusting the test. Then end ' +
+      'your reply with exactly these two lines and nothing after them:',
+    `CLASSIFICATION: <one of: ${TEST_TRIAGE_CATEGORIES.join(', ')}>`,
+    'REASON: <one line saying why, citing the answer or the test>',
   );
   return parts.join('\n');
 }
@@ -540,9 +771,17 @@ function renderTriage(
       'Triage never blocks a release.',
   );
   out.push('');
+  const lines = triaged.map(({ target }) => target.line);
+  const { grader } = info;
+  const graded = `graded ${info.gradings} time(s) by ${grader.id} (via ${grader.adapter})`;
+  const ran = 'run against the code tests';
+  const how = !lines.some((line) => 'test' in line)
+    ? graded
+    : !lines.some((line) => 'criterion' in line)
+      ? ran
+      : `${graded} for a criterion, ${ran} for a code test`;
   out.push(
-    `Method: ${info.samples} fresh with-skill sample(s) per failure, each graded ` +
-      `${info.gradings} time(s) by ${info.grader.id} (via ${info.grader.adapter}); ` +
+    `Method: ${info.samples} fresh with-skill sample(s) per failure, each ${how}; ` +
       Option.from(info.classifier).match(
         (classifier) => `classified by ${classifier.id} (via ${classifier.adapter}).`,
         () => 'classified by the model under test whose output failed.',
@@ -575,7 +814,7 @@ function renderTriage(
   for (const { target, samples, item } of triaged) {
     out.push(`## \`${item.skill}\` / \`${item.scenario}\` / ${item.model}`);
     out.push('');
-    out.push(`Criterion ${target.criterion + 1}: *"${item.criterion}"*`);
+    out.push(`Criterion ${lineNumber(target)}: *"${item.criterion}"*`);
     out.push('');
     out.push(
       `Why: ${target.causes.join('; ')}. In the run: baseline ${target.score.baselinePct}%, ` +
@@ -603,6 +842,19 @@ function renderTriage(
         out.push('');
         out.push(`[ERROR] ${sample.error}`);
         out.push('');
+        return;
+      }
+      if ('testMessage' in sample) {
+        out.push(`### Sample ${i + 1} — test: ${testVerdictText(sample.verdict)}`);
+        out.push('');
+        out.push(fenced(sample.output));
+        out.push('');
+        if (sample.testMessage !== '') {
+          out.push(sample.verdict === null ? 'Why there is no verdict:' : 'Test message:');
+          out.push('');
+          out.push(fenced(sample.testMessage));
+          out.push('');
+        }
         return;
       }
       out.push(`### Sample ${i + 1} — grader: ${verdictText(sample.verdict)}`);

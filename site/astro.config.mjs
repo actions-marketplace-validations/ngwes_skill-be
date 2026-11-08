@@ -11,6 +11,19 @@ export default defineConfig({
 	integrations: [
 		starlight({
 			title: 'skill-be',
+			// The pixel-art icon of the skill-be banner (assets/skill-be-banner.png), 192x192.
+			favicon: '/favicon.png',
+			// The same icon, reduced to 40x40 for the header and drawn with square pixels (see the CSS)
+			logo: { src: './src/assets/skill-be-icon.png', alt: '' },
+			// The skill-be theme (src/styles/skill-be.css) and its self-hosted fonts, OFL 1.1
+			// (public/fonts/). The code blocks are themed in ec.config.mjs.
+			customCss: [
+				'@fontsource/ibm-plex-mono/400.css',
+				'@fontsource/ibm-plex-mono/400-italic.css',
+				'@fontsource/ibm-plex-mono/600.css',
+				'@fontsource/press-start-2p/400.css',
+				'./src/styles/skill-be.css',
+			],
 			description:
 				'A CLI that benchmarks Agent Skills: baseline versus with-skill, LLM-graded and gated, on any harness.',
 			social: [

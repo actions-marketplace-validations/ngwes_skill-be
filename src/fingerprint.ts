@@ -1,5 +1,6 @@
 /**
- * The fingerprint of a skill: a SHA-256 over its `SKILL.md`, its eval file and the config file.
+ * The fingerprint of a skill: a SHA-256 over its `SKILL.md`, its eval file and the config file, and
+ * over its code tests and package list when it has them.
  *
  * It lets `verify` tell, without a model call, that a skill changed since its last run. The files
  * are hashed with CRLF turned into LF, so a Windows checkout matches a Linux one, and each is
@@ -26,9 +27,20 @@ export async function fingerprint(files: string[], root: string): Promise<string
   return hash.digest('hex');
 }
 
-/** The fingerprint of one skill: its `SKILL.md`, its eval file and the config file, in turn. */
+/**
+ * The fingerprint of one skill: its `SKILL.md`, its eval file and the config file, in turn, then
+ * its test files and helpers and its package list when it has any. A skill graded by a judge alone
+ * has none, and hashes as it did before code tests existed.
+ */
 export function skillFingerprint(config: Config, suite: SkillSuite): Promise<string> {
-  return fingerprint([suite.skillPath, suite.evalPath, config.configPath], config.root);
+  const files = [
+    suite.skillPath,
+    suite.evalPath,
+    config.configPath,
+    ...suite.codeFiles,
+    ...(suite.packageList === null ? [] : [suite.packageList]),
+  ];
+  return fingerprint(files, config.root);
 }
 
 /** The bytes with every CRLF turned into LF. Latin-1 maps bytes to characters one to one. */
